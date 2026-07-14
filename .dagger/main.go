@@ -57,10 +57,12 @@ const (
 
 	// BootMCU (RISC-V RV32) firmware, built from the aspeed-mcu-runtime Rust
 	// sources. These match aspeed-mcu-runtime's own build parameters.
-	rustChannel   = "nightly-2026-04-01"
 	bootmcuTarget = "riscv32imc-unknown-none-elf"
 	bootmcuBin    = "rot_ast2700_bootmcu"
-	bootmcuFlags  = "--cfg portable_atomic_unsafe_assume_single_core -C link-arg=-Tmemory.x -C link-arg=-Tlink.x -C link-arg=--nmagic"
+	// No portable_atomic_unsafe_assume_single_core cfg: app-rot deliberately
+	// uses portable-atomic's critical-section provider (riscv
+	// critical-section-single-hart), which is mutually exclusive with that cfg.
+	bootmcuFlags = "-C link-arg=-Tmemory.x -C link-arg=-Tlink.x -C link-arg=--nmagic"
 )
 
 // Cairn is the Dagger module root.
@@ -86,7 +88,7 @@ func (m *Cairn) base(
 	// In-container workspace: cairn + the shared core module + the tamago fork
 	// (AST2700 support) + scree + nats-server + aspeed-go (FTGMAC/SPI HAL) +
 	// lneto (userspace TCP/IP).
-	goWork := "go 1.26.4\n\nuse (\n\t./cairn\n\t./core\n\t./tamago\n\t./scree\n\t./nats-server\n\t./aspeed-go\n\t./lneto\n)\n"
+	goWork := "go 1.27\n\nuse (\n\t./cairn\n\t./core\n\t./tamago\n\t./scree\n\t./nats-server\n\t./aspeed-go\n\t./lneto\n)\n"
 
 	return dag.Container().
 		From(stagexPallet).
@@ -180,51 +182,47 @@ func (m *Cairn) imageContainer(
 		WithEnvVariable("GOARCH", "arm64")
 }
 
-// bootMCU builds the BootMCU firmware (Rust) from the aspeed-mcu-runtime sources
-// and writes the raw FMC binary to /out/rot_ast2700_bootmcu.fmc.bin. The Rust
-// nightly toolchain (with the RV32 target) is composed in from the StageX Rust
-// image; the image reference is pinned/overridable via rustImage.
-func (m *Cairn) bootMCU(
-	ctr *dagger.Container,
+// bootMCUFirmwareELF builds the BootMCU firmware ELF from the aspeed-mcu-runtime
+// Rust sources in the StageX Rust image (pinned/overridable via rustImage).
+// StageX ships a rustup-less toolchain with no prebuilt riscv32 std, so core is
+// built via -Zbuild-std (RUSTC_BOOTSTRAP unlocks it on the pinned stable
+// toolchain) — the same approach aspeed-mcu-runtime's own CI uses.
+func (m *Cairn) bootMCUFirmwareELF(
 	rustImage string,
 	aspeedMcuRuntime, aspeedRs, aspeedData *dagger.Directory,
-) *dagger.Container {
-	rustCtr := dag.Container().
-		From(rustImage).
-		WithExec([]string{
-			"rustup", "toolchain", "install", rustChannel,
-			"--profile", "minimal",
-			"--target", bootmcuTarget,
-			"--no-self-update",
-		}).
-		WithExec([]string{"rustup", "default", rustChannel})
-
+) *dagger.File {
 	cargoCache := dag.CacheVolume("cairn-cargo-registry")
-	cargoBuild := dag.CacheVolume("cairn-cargo-build")
-
-	return ctr.
-		WithDirectory("/usr/local/cargo", rustCtr.Directory("/usr/local/cargo")).
-		WithDirectory("/usr/local/rustup", rustCtr.Directory("/usr/local/rustup")).
+	elf := "/build/aspeed-mcu-runtime/app-rot/target/" +
+		bootmcuTarget + "/release/" + bootmcuBin
+	return dag.Container().
+		From(rustImage).
 		WithEnvVariable("CARGO_HOME", "/usr/local/cargo").
-		WithEnvVariable("RUSTUP_HOME", "/usr/local/rustup").
-		WithEnvVariable("PATH", "/build/tamago-go/bin:/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin").
+		WithEnvVariable("RUSTC_BOOTSTRAP", "1").
 		WithMountedCache("/usr/local/cargo/registry", cargoCache).
-		WithMountedCache("/build/aspeed-mcu-runtime/aspeed-mcu-target", cargoBuild).
 		WithDirectory("/build/aspeed-mcu-runtime", aspeedMcuRuntime).
 		WithDirectory("/build/aspeed-rs", aspeedRs).
 		WithDirectory("/build/aspeed-data", aspeedData).
 		WithWorkdir("/build/aspeed-mcu-runtime/app-rot").
 		WithEnvVariable("RUSTFLAGS", bootmcuFlags).
 		WithExec([]string{"cargo", "build",
-			"--target-dir", "/build/aspeed-mcu-runtime/aspeed-mcu-target",
 			"--target", bootmcuTarget,
 			"--release",
 			"--bin", bootmcuBin,
 			"--no-default-features",
 			"--features", "ast2700-bootmcu",
+			"-Z", "build-std=core",
 		}).
+		File(elf)
+}
+
+// bootMCU copies the separately-built BootMCU firmware ELF into the image
+// container and objcopies it to the raw FMC binary at
+// /out/rot_ast2700_bootmcu.fmc.bin. llvm-objcopy comes from the pallet-cgo base.
+func (m *Cairn) bootMCU(ctr *dagger.Container, firmware *dagger.File) *dagger.Container {
+	return ctr.
+		WithFile("/out/rot_ast2700_bootmcu.elf", firmware).
 		WithExec([]string{"llvm-objcopy", "-O", "binary",
-			"/build/aspeed-mcu-runtime/aspeed-mcu-target/" + bootmcuTarget + "/release/" + bootmcuBin,
+			"/out/rot_ast2700_bootmcu.elf",
 			"/out/rot_ast2700_bootmcu.fmc.bin"}).
 		WithWorkdir("/build/cairn")
 }
@@ -236,7 +234,8 @@ func (m *Cairn) bootMCU(
 // The BootMCU firmware is either supplied prebuilt via bootMcuFmc (skips the
 // Rust build — useful where the StageX Rust image is unavailable) or built from
 // the aspeed-mcu-runtime Rust sources (requires aspeedMcuRuntime/aspeedRs/
-// aspeedData and a rustup-capable, musl-compatible rustImage).
+// aspeedData and a musl-compatible StageX rustImage; core is built via
+// -Zbuild-std, so no prebuilt riscv32 std is needed).
 //
 // silicon selects the bmc-pb subdirectory (a1 → ast2700a1, a2 → ast2700a2). The
 // BootMCU detects the silicon revision at runtime, so a single firmware serves
@@ -299,7 +298,8 @@ func (m *Cairn) Image(
 		if aspeedMcuRuntime == nil || aspeedRs == nil || aspeedData == nil {
 			return nil, fmt.Errorf("image: building the BootMCU needs --aspeed-mcu-runtime, --aspeed-rs and --aspeed-data (or supply --boot-mcu-fmc)")
 		}
-		ctr = m.bootMCU(ctr, rustImage, aspeedMcuRuntime, aspeedRs, aspeedData)
+		firmware := m.bootMCUFirmwareELF(rustImage, aspeedMcuRuntime, aspeedRs, aspeedData)
+		ctr = m.bootMCU(ctr, firmware)
 	}
 
 	ctr = ctr.
