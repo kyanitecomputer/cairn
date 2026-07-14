@@ -158,19 +158,39 @@ func (m *Cairn) Test(
 		Stdout(ctx)
 }
 
-// imageContainer composes the payload build (Go/TamaGo) with the BootMCU cross
-// toolchain (Rust) and the imgtools stitcher (host Go), so a single container
-// can build every artifact that goes into the AST2700 SPI flash image.
-//
-// The Rust nightly toolchain (with the RV32 BootMCU target) is composed in from
-// the StageX Rust image, mirroring aspeed-mcu-runtime's own image container —
-// but the stitching itself now lives here in cairn.
+// imageContainer composes the cairn payload build (Go/TamaGo) with the imgtools
+// stitcher (host Go) and the bmc-pb prebuilts — everything needed to stitch an
+// AST2700 SPI flash image except the BootMCU firmware, which is either provided
+// as a prebuilt (see Image's bootMcuFmc) or built from Rust by bootMCU below.
 func (m *Cairn) imageContainer(
-	src, tamago, tamagoGo, core, scree, natsServer, aspeedGo, lneto,
-	aspeedMcuRuntime, aspeedRs, aspeedData, bmcPb *dagger.Directory,
+	src, tamago, tamagoGo, core, scree, natsServer, aspeedGo, lneto, bmcPb *dagger.Directory,
+) *dagger.Container {
+	return m.base(src, tamago, tamagoGo, core, scree, natsServer, aspeedGo, lneto).
+		WithDirectory("/build/bmc-pb", bmcPb).
+		WithExec([]string{"mkdir", "-p", "/out"}).
+		// Build the imgtools stitcher as a host (linux/amd64) binary — it runs
+		// in-container to stitch the image, so it must not inherit the payload's
+		// GOOS=tamago. Restore the tamago cross-build env afterwards.
+		WithEnvVariable("GOWORK", "off").
+		WithEnvVariable("GOOS", "linux").
+		WithEnvVariable("GOARCH", "amd64").
+		WithExec([]string{"go", "build", "-C", "/build/cairn/tools/imgtools", "-o", "/usr/local/bin/imgtools", "."}).
+		WithEnvVariable("GOWORK", "/build/go.work").
+		WithEnvVariable("GOOS", "tamago").
+		WithEnvVariable("GOARCH", "arm64")
+}
+
+// bootMCU builds the BootMCU firmware (Rust) from the aspeed-mcu-runtime sources
+// and writes the raw FMC binary to /out/rot_ast2700_bootmcu.fmc.bin. The Rust
+// nightly toolchain (with the RV32 target) is composed in from the StageX Rust
+// image; the image reference is pinned/overridable via rustImage.
+func (m *Cairn) bootMCU(
+	ctr *dagger.Container,
+	rustImage string,
+	aspeedMcuRuntime, aspeedRs, aspeedData *dagger.Directory,
 ) *dagger.Container {
 	rustCtr := dag.Container().
-		From(stagexRust).
+		From(rustImage).
 		WithExec([]string{
 			"rustup", "toolchain", "install", rustChannel,
 			"--profile", "minimal",
@@ -182,8 +202,7 @@ func (m *Cairn) imageContainer(
 	cargoCache := dag.CacheVolume("cairn-cargo-registry")
 	cargoBuild := dag.CacheVolume("cairn-cargo-build")
 
-	return m.base(src, tamago, tamagoGo, core, scree, natsServer, aspeedGo, lneto).
-		// Compose the Rust toolchain from the StageX Rust image.
+	return ctr.
 		WithDirectory("/usr/local/cargo", rustCtr.Directory("/usr/local/cargo")).
 		WithDirectory("/usr/local/rustup", rustCtr.Directory("/usr/local/rustup")).
 		WithEnvVariable("CARGO_HOME", "/usr/local/cargo").
@@ -194,20 +213,34 @@ func (m *Cairn) imageContainer(
 		WithDirectory("/build/aspeed-mcu-runtime", aspeedMcuRuntime).
 		WithDirectory("/build/aspeed-rs", aspeedRs).
 		WithDirectory("/build/aspeed-data", aspeedData).
-		WithDirectory("/build/bmc-pb", bmcPb).
-		WithExec([]string{"mkdir", "-p", "/out"}).
-		// Build the imgtools stitcher (host Go, standalone module).
-		WithEnvVariable("GOWORK", "off").
-		WithExec([]string{"go", "build", "-C", "/build/cairn/tools/imgtools", "-o", "/usr/local/bin/imgtools", "."}).
-		WithEnvVariable("GOWORK", "/build/go.work")
+		WithWorkdir("/build/aspeed-mcu-runtime/app-rot").
+		WithEnvVariable("RUSTFLAGS", bootmcuFlags).
+		WithExec([]string{"cargo", "build",
+			"--target-dir", "/build/aspeed-mcu-runtime/aspeed-mcu-target",
+			"--target", bootmcuTarget,
+			"--release",
+			"--bin", bootmcuBin,
+			"--no-default-features",
+			"--features", "ast2700-bootmcu",
+		}).
+		WithExec([]string{"llvm-objcopy", "-O", "binary",
+			"/build/aspeed-mcu-runtime/aspeed-mcu-target/" + bootmcuTarget + "/release/" + bootmcuBin,
+			"/out/rot_ast2700_bootmcu.fmc.bin"}).
+		WithWorkdir("/build/cairn")
 }
 
-// Image builds the BootMCU firmware (Rust) and the cairn CA35 payload (TamaGo)
-// and stitches them into a complete AST2700 SPI flash image using imgtools, with
-// the DDR-training / Caliptra / DP prebuilts drawn from bmc-pb for the selected
-// silicon revision.
+// Image builds the cairn CA35 payload (TamaGo) and stitches it, the BootMCU
+// firmware, and the bmc-pb prebuilts (Caliptra, DDR training, DP FW) into a
+// complete AST2700 SPI flash image using imgtools.
 //
-// silicon selects the bmc-pb subdirectory (a1 → ast2700a1, a2 → ast2700a2).
+// The BootMCU firmware is either supplied prebuilt via bootMcuFmc (skips the
+// Rust build — useful where the StageX Rust image is unavailable) or built from
+// the aspeed-mcu-runtime Rust sources (requires aspeedMcuRuntime/aspeedRs/
+// aspeedData and a rustup-capable, musl-compatible rustImage).
+//
+// silicon selects the bmc-pb subdirectory (a1 → ast2700a1, a2 → ast2700a2). The
+// BootMCU detects the silicon revision at runtime, so a single firmware serves
+// both; silicon only selects the DRAM-training/Caliptra/DP prebuilt set.
 // buildTags overrides the payload build tags for board/silicon variants.
 func (m *Cairn) Image(
 	ctx context.Context,
@@ -220,10 +253,17 @@ func (m *Cairn) Image(
 	natsServer *dagger.Directory,
 	aspeedGo *dagger.Directory,
 	lneto *dagger.Directory,
-	aspeedMcuRuntime *dagger.Directory,
-	aspeedRs *dagger.Directory,
-	aspeedData *dagger.Directory,
 	bmcPb *dagger.Directory,
+	// +optional
+	bootMcuFmc *dagger.File,
+	// +optional
+	aspeedMcuRuntime *dagger.Directory,
+	// +optional
+	aspeedRs *dagger.Directory,
+	// +optional
+	aspeedData *dagger.Directory,
+	// +default="stagex/pallet-rust:sx2026.06.0"
+	rustImage string,
 	// +default="a1"
 	silicon string,
 	// +default="32M"
@@ -233,6 +273,9 @@ func (m *Cairn) Image(
 	// +default=""
 	buildTags string,
 ) (*dagger.Directory, error) {
+	if rustImage == "" {
+		rustImage = stagexRust
+	}
 	if silicon == "" {
 		silicon = "a1"
 	}
@@ -247,22 +290,19 @@ func (m *Cairn) Image(
 	}
 	pb := "/build/bmc-pb/ast2700" + silicon
 
-	ctr := m.imageContainer(src, tamago, tamagoGo, core, scree, natsServer, aspeedGo, lneto,
-		aspeedMcuRuntime, aspeedRs, aspeedData, bmcPb).
-		// BootMCU firmware (Rust) → raw FMC binary.
-		WithWorkdir("/build/aspeed-mcu-runtime/app-rot").
-		WithEnvVariable("RUSTFLAGS", bootmcuFlags).
-		WithExec([]string{"cargo", "build",
-			"--target-dir", "/build/aspeed-mcu-runtime/aspeed-mcu-target",
-			"--target", bootmcuTarget,
-			"--release",
-			"--bin", bootmcuBin,
-			"--no-default-features",
-			"--features", "ast2700-bootmcu",
-		}).
-		WithExec([]string{"llvm-objcopy", "-O", "binary",
-			"/build/aspeed-mcu-runtime/aspeed-mcu-target/" + bootmcuTarget + "/release/" + bootmcuBin,
-			"/out/rot_ast2700_bootmcu.fmc.bin"}).
+	ctr := m.imageContainer(src, tamago, tamagoGo, core, scree, natsServer, aspeedGo, lneto, bmcPb)
+
+	// BootMCU firmware: use the prebuilt FMC when provided, else build from Rust.
+	if bootMcuFmc != nil {
+		ctr = ctr.WithFile("/out/rot_ast2700_bootmcu.fmc.bin", bootMcuFmc)
+	} else {
+		if aspeedMcuRuntime == nil || aspeedRs == nil || aspeedData == nil {
+			return nil, fmt.Errorf("image: building the BootMCU needs --aspeed-mcu-runtime, --aspeed-rs and --aspeed-data (or supply --boot-mcu-fmc)")
+		}
+		ctr = m.bootMCU(ctr, rustImage, aspeedMcuRuntime, aspeedRs, aspeedData)
+	}
+
+	ctr = ctr.
 		// cairn CA35 payload (TamaGo) → raw binary.
 		WithWorkdir("/build/cairn").
 		WithExec([]string{"go", "build", "-trimpath",
