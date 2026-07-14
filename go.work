@@ -1,0 +1,27 @@
+// Local development workspace.
+//
+// The ASPEED AST2700 arm64 SoC/board support currently lives in the root
+// TamaGo fork (../tamago) and is not yet upstreamed. Until it lands, redirect
+// tamago to that fork via this workspace. This file shadows the root
+// kyanite/go.work for any build run from within cairn/.
+//
+// Dagger builds construct their own go.work in-container and ignore this file.
+//
+// The go directive here matches the tamago-go compiler; the workspace go
+// version must be >= every member module. The cairn module itself (go.mod)
+// targets 1.27.
+go 1.27
+
+use (
+	.
+	../aspeed-go
+	../core
+	../lneto
+	../nats-server
+	../scree
+	../tamago
+)
+
+// scree's go.mod requires github.com/nats-io/nats-server/v2 (for its JetStream
+// adapter). Listing ../nats-server here satisfies that module-graph requirement
+// locally; nats-server is not compiled unless imported.

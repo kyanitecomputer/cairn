@@ -1,0 +1,10 @@
+# Build artifacts
+/bin/
+/out/
+
+# Stray target-named build output at repo root
+/ast2700-dcscm-evb
+
+# Generated Dagger SDK glue (regenerated with `dagger develop`)
+.dagger/dagger.gen.go
+.dagger/internal/
