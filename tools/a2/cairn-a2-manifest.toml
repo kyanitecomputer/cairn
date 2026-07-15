@@ -20,29 +20,42 @@ flags = 0
 security_version = 1
 prj_name = "cairn-a2"
 
+# MLDSA keys: PQC signing uses LMS (--pqc-key-type 3), but this tool version
+# always embeds an MLDSA public key in the manifest, so dev MLDSA keys must be
+# present. gen-a2-image.sh assembles a combined key dir with the ecc+lms keys
+# from key/ast2700-default and these MLDSA dev keys from key/ast1040a0-default.
+
 [vendor_fw_key_config]
 ecc_pub_key = "vnd-fw-ecc-pubk.pem"
 ecc_priv_key = "vnd-fw-ecc-prvk.pem"
 lms_pub_key = "vnd-fw-lms-pubk.pem"
 lms_priv_key = "vnd-fw-lms-prvk.pem"
+mldsa_pub_key = "vnd-fw-mldsa-pub-key-0.bin"
+mldsa_priv_key = "vnd-fw-mldsa-priv-key-0.bin"
 
 [vendor_man_key_config]
 ecc_pub_key = "vnd-man-ecc-pubk.pem"
 ecc_priv_key = "vnd-man-ecc-prvk.pem"
 lms_pub_key = "vnd-man-lms-pubk.pem"
 lms_priv_key = "vnd-man-lms-prvk.pem"
+mldsa_pub_key = "vnd-man-mldsa-pub-key.bin"
+mldsa_priv_key = "vnd-man-mldsa-priv-key.bin"
 
 [owner_fw_key_config]
 ecc_pub_key = "own-fw-ecc-pubk.pem"
 ecc_priv_key = "own-fw-ecc-prvk.pem"
 lms_pub_key = "own-fw-lms-pubk.pem"
 lms_priv_key = "own-fw-lms-prvk.pem"
+mldsa_pub_key = "own-fw-mldsa-pub-key.bin"
+mldsa_priv_key = "own-fw-mldsa-priv-key.bin"
 
 [owner_man_key_config]
 ecc_pub_key = "own-man-ecc-pubk.pem"
 ecc_priv_key = "own-man-ecc-prvk.pem"
 lms_pub_key = "own-man-lms-pubk.pem"
 lms_priv_key = "own-man-lms-prvk.pem"
+mldsa_pub_key = "own-man-mldsa-pub-key.bin"
+mldsa_priv_key = "own-man-mldsa-priv-key.bin"
 
 [image_runtime_list]
 caliptra_file = "caliptra-fw.bin"

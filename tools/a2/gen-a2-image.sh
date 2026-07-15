@@ -36,9 +36,13 @@ CAIRN="$(cd "$HERE/../.." && pwd)"
 TAMAGO="${TAMAGO:-/home/mdr164/private/tamago/tamago-go/bin/go}"
 CPTRA_IMGTOOL="${CPTRA_IMGTOOL:-$CAIRN/../cptra_imgtool}"
 PREBUILT="${PREBUILT:?set PREBUILT to a dir with caliptra-fw/mcu-runtime/prebuilts}"
-KEYDIR="${KEYDIR:-$CPTRA_IMGTOOL/key/ast2700-default}"
+# ast2700-default supplies the ECC+LMS dev keys; MLDSA_KEYDIR supplies the MLDSA
+# dev keys this tool version requires (present-but-unused under LMS PQC).
+KEYSRC="${KEYSRC:-$CPTRA_IMGTOOL/key/ast2700-default}"
+MLDSA_KEYSRC="${MLDSA_KEYSRC:-$CPTRA_IMGTOOL/key/ast1040a0-default}"
 OUT="${OUT:-$CAIRN/out}"
 STAGE="$OUT/a2-stage"
+KEYDIR="$STAGE/keys"
 
 IMGTOOLS="$CAIRN/bin/imgtools"
 MANIFEST_TOOL="$CPTRA_IMGTOOL/target/release/caliptra-auth-manifest-app-2x"
@@ -65,6 +69,16 @@ if [ ! -x "$MANIFEST_TOOL" ]; then
 	echo "Build it: (cd $CPTRA_IMGTOOL && cargo build --release -p caliptra-auth-manifest-app-2x)" >&2
 	exit 1
 fi
+
+# Assemble a combined key dir: ECC+LMS dev keys + MLDSA dev keys (see config).
+rm -rf "$KEYDIR" && mkdir -p "$KEYDIR"
+cp "$KEYSRC"/*.pem "$KEYDIR/"
+for k in vnd-fw-mldsa-pub-key-0 vnd-fw-mldsa-priv-key-0 \
+         vnd-man-mldsa-pub-key vnd-man-mldsa-priv-key \
+         own-fw-mldsa-pub-key own-fw-mldsa-priv-key \
+         own-man-mldsa-pub-key own-man-mldsa-priv-key; do
+	cp "$MLDSA_KEYSRC/$k.bin" "$KEYDIR/"
+done
 
 ( cd "$CPTRA_IMGTOOL" && cargo run --release -- create-auth-man-2x \
 	--cfg "$HERE/cairn-a2-manifest.toml" \
