@@ -1,68 +1,78 @@
 package main
 
 import (
-	"bytes"
 	"encoding/binary"
+	"hash/crc32"
 	"testing"
 )
 
-// TestBuildFlashImageRoundtrip mirrors caliptra-sw hw-model/src/flash_image.rs
-// test_build_flash_image_roundtrip to guarantee our port is byte-compatible with
-// the format the MCU ROM parses.
-func TestBuildFlashImageRoundtrip(t *testing.T) {
-	fw := bytes.Repeat([]byte{0xAA}, 100)
-	manifest := bytes.Repeat([]byte{0xBB}, 200)
-	mcu := bytes.Repeat([]byte{0xCC}, 50)
+// TestBuildFlashImageBuild mirrors caliptra-mcu-sw builder/src/flash_image.rs
+// test_flash_image_build (at the AST2700 A1/A2 pinned revision) to guarantee our
+// port is byte-compatible with the format the MCU ROM parses.
+func TestBuildFlashImageBuild(t *testing.T) {
+	caliptra := []byte("Caliptra Firmware Data - ABCDEFGH")
+	manifest := []byte("Soc Manifest Data - 123456789")
+	mcu := []byte("MCU Runtime Data - QWERTYUI")
+	soc1 := []byte("Soc Image 1 Data - ZXCVBNMLKJ")
+	soc2 := []byte("Soc Image 2 Data - POIUYTREWQ")
 
-	img := buildFlashImage([]flshImage{
-		{flshIDCaliptraFmcRt, fw},
+	data := buildFlashImage([]flshImage{
+		{flshIDCaliptraFmcRt, caliptra},
 		{flshIDSocManifest, manifest},
 		{flshIDMcuRt, mcu},
+		{flshIDSocImagesBase, soc1},
+		{flshIDSocImagesBase + 1, soc2},
 	})
-	if len(img) == 0 {
+	if len(data) == 0 {
 		t.Fatal("empty image")
 	}
 
-	// Flash header.
-	if string(img[0:4]) != "FLSH" {
-		t.Fatalf("magic = %q, want FLSH", img[0:4])
+	// Header: magic big-endian "FLSH", version + count little-endian.
+	if magic := binary.BigEndian.Uint32(data[0:4]); magic != 0x464C5348 {
+		t.Fatalf("magic = %#x, want 0x464C5348", magic)
 	}
-	if v := binary.LittleEndian.Uint16(img[4:6]); v != flshHeaderVersion {
+	if v := binary.LittleEndian.Uint16(data[4:6]); v != flshHeaderVersion {
 		t.Fatalf("version = %d, want %d", v, flshHeaderVersion)
 	}
-	if c := binary.LittleEndian.Uint16(img[6:8]); c != 3 {
-		t.Fatalf("image_count = %d, want 3", c)
-	}
-	hdrOff := binary.LittleEndian.Uint32(img[8:12])
-	if hdrOff != flshHeaderSize {
-		t.Fatalf("image_headers_offset = %d, want %d", hdrOff, flshHeaderSize)
-	}
-	if got, want := binary.LittleEndian.Uint32(img[12:16]), flshChecksum(img[:12]); got != want {
-		t.Fatalf("header_checksum = %#x, want %#x", got, want)
+	if c := binary.LittleEndian.Uint16(data[6:8]); c != 5 {
+		t.Fatalf("image_count = %d, want 5", c)
 	}
 
-	wantIDs := []uint32{flshIDCaliptraFmcRt, flshIDSocManifest, flshIDMcuRt}
-	for i := 0; i < 3; i++ {
-		off := int(hdrOff) + i*flshImageHdrSize
-		h := img[off : off+flshImageHdrSize]
-		id := binary.LittleEndian.Uint32(h[0:4])
-		ioff := binary.LittleEndian.Uint32(h[4:8])
-		size := binary.LittleEndian.Uint32(h[8:12])
-		ick := binary.LittleEndian.Uint32(h[12:16])
-		hck := binary.LittleEndian.Uint32(h[16:20])
+	// Checksums: header CRC over [0..8], payload CRC over [16..].
+	if got, want := binary.LittleEndian.Uint32(data[8:12]), crc32.ChecksumIEEE(data[0:8]); got != want {
+		t.Fatalf("header_crc = %#x, want %#x", got, want)
+	}
+	if got, want := binary.LittleEndian.Uint32(data[12:16]), crc32.ChecksumIEEE(data[16:]); got != want {
+		t.Fatalf("payload_crc = %#x, want %#x", got, want)
+	}
 
-		if id != wantIDs[i] {
-			t.Fatalf("image[%d] id = %#x, want %#x", i, id, wantIDs[i])
+	type want struct {
+		id   uint32
+		body []byte
+	}
+	wants := []want{
+		{flshIDCaliptraFmcRt, caliptra},
+		{flshIDSocManifest, manifest},
+		{flshIDMcuRt, mcu},
+		{flshIDSocImagesBase, soc1},
+		{flshIDSocImagesBase + 1, soc2},
+	}
+	for i, w := range wants {
+		off := flshHeaderSize + flshCksumSize + flshInfoSize*i
+		id := binary.LittleEndian.Uint32(data[off : off+4])
+		ioff := binary.LittleEndian.Uint32(data[off+4 : off+8])
+		size := binary.LittleEndian.Uint32(data[off+8 : off+12])
+
+		if id != w.id {
+			t.Fatalf("image[%d] id = %#x, want %#x", i, id, w.id)
 		}
-		if size != 256 { // 100/200/50 all pad to 256
-			t.Fatalf("image[%d] size = %d, want 256", i, size)
+		wantSize := (len(w.body) + 3) &^ 3
+		if int(size) != wantSize {
+			t.Fatalf("image[%d] size = %d, want %d (4-byte padded)", i, size, wantSize)
 		}
-		if want := flshChecksum(h[:16]); hck != want {
-			t.Fatalf("image[%d] header_checksum = %#x, want %#x", i, hck, want)
-		}
-		data := img[ioff : ioff+size]
-		if want := flshChecksum(data); ick != want {
-			t.Fatalf("image[%d] image_checksum = %#x, want %#x", i, ick, want)
+		got := data[ioff : ioff+uint32(len(w.body))]
+		if string(got) != string(w.body) {
+			t.Fatalf("image[%d] data mismatch", i)
 		}
 	}
 }

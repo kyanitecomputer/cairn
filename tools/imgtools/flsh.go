@@ -4,68 +4,65 @@ import (
 	"encoding/binary"
 	"flag"
 	"fmt"
+	"hash/crc32"
 	"os"
-	"strconv"
-	"strings"
 )
 
 // AST2700-A2 "FLSH" flash image container.
 //
-// A2 replaces the A1 ASTH secure-boot header with a top-level flash container
-// that the MCU ROM parses to locate the Caliptra firmware, the SoC (auth)
-// manifest, the MCU runtime (BootMCU FMC), and any additional SoC images. The
-// ROM authorizes each image through Caliptra (SET_AUTH_MANIFEST /
-// AUTHORIZE_AND_STASH) using the digests carried in the SoC manifest.
+// A2 replaces the A1 ASTH secure-boot header with a top-level "FLSH" flash
+// container that the MCU ROM parses to locate the Caliptra firmware, the SoC
+// (auth) manifest, the MCU runtime (BootMCU FMC), and any additional SoC images;
+// the ROM then authorizes each image through Caliptra (SET_AUTH_MANIFEST /
+// AUTHORIZE_AND_STASH) using the digests carried in the SoC manifest. Our A1
+// ASTH images therefore do not boot on A2.
 //
-// This is a byte-for-byte port of caliptra-sw hw-model/src/flash_image.rs
-// (build_flash_image_bytes) — the format the MCU ROM's flash-boot path expects —
-// extended with additional SoC images the way the vendor cptra_imgtool does via
-// `xtask flash-image create --soc-images`.
+// This is a byte-for-byte port of the caliptra-mcu-sw flash-image builder
+// (builder/src/flash_image.rs) at the AST2700 A1/A2 pinned revision
+// 2b7837402328ab611968d40243075082469df7ae, verified against the official
+// ASPEED A2 flash image (ast2700-manifest-flash.bin): both CRC-32 checksums and
+// the image-info table reproduce exactly.
 //
-// Layout:
+// Layout (all little-endian except the ASCII magic):
 //
-//	FlashHeader (16B)
-//	ImageHeader (20B) × image_count
-//	image data, each padded to 256 bytes, in header order
+//	Header        magic[4]="FLSH" (0x464C5348) | version u16=1 | image_count u16
+//	Checksums     header_crc32 u32 | payload_crc32 u32
+//	ImageInfo[n]  identifier u32 | image_offset u32 | size u32       (12 bytes each)
+//	Images        raw data, each padded to a 4-byte boundary, in ImageInfo order
 //
-// All integers are little-endian. The checksum is the two's-complement of the
-// byte sum (0 - Σ bytes), computed over each structure excluding its own
-// trailing checksum field, and over each image's (padded) data.
+//   - header_crc32  = CRC-32/IEEE over the 8-byte Header.
+//   - payload_crc32 = CRC-32/IEEE over the ImageInfo table + all (padded) images.
+//   - image_offset  is absolute from byte 0 of the Header.
+//   - size          is the padded (4-byte-aligned) length.
 
 const (
-	// Canonical MCU-ROM image identifiers (caliptra-sw flash_image.rs).
-	flshIDCaliptraFmcRt = 0x0000_0000
-	flshIDSocManifest   = 0x0000_0001
-	flshIDMcuRt         = 0x0000_0002
+	flshMagic         = "FLSH" // stored big-endian: 0x464C5348 == bytes 'F','L','S','H'
+	flshHeaderVersion = 0x0001
 
-	flshMagic          = "FLSH"
-	flshHeaderVersion  = 0x0001
-	flshHeaderSize     = 16 // magic(4)+version(2)+count(2)+headers_off(4)+checksum(4)
-	flshImageHdrSize   = 20 // id(4)+offset(4)+size(4)+img_cksum(4)+hdr_cksum(4)
-	flshImageAlignment = 256
+	flshHeaderSize = 8  // magic(4) + version(2) + image_count(2)
+	flshCksumSize  = 8  // header_crc32(4) + payload_crc32(4)
+	flshInfoSize   = 12 // identifier(4) + image_offset(4) + size(4)
+
+	// Image identifiers (caliptra-mcu-sw builder).
+	flshIDCaliptraFmcRt = 0x0000_0001
+	flshIDSocManifest   = 0x0000_0002
+	flshIDMcuRt         = 0x0000_0003
+	flshIDSocImagesBase = 0x0000_1000 // additional SoC images, incrementing
 )
 
-// flshImage is one image to place in the container.
+// flshImage is one image to place in the container (data already read).
 type flshImage struct {
 	id   uint32
 	data []byte
 }
 
-// flshChecksum returns the two's-complement of the byte sum of data.
-func flshChecksum(data []byte) uint32 {
-	var sum uint32
-	for _, b := range data {
-		sum += uint32(b)
-	}
-	return -sum
-}
+func flshCrc32(data []byte) uint32 { return crc32.ChecksumIEEE(data) }
 
-func flshPadTo256(data []byte) []byte {
-	n := (len(data) + flshImageAlignment - 1) &^ (flshImageAlignment - 1)
+// flshPad4 returns data padded with zeros to a 4-byte boundary.
+func flshPad4(data []byte) []byte {
+	n := (len(data) + 3) &^ 3
 	if n == len(data) {
-		out := make([]byte, len(data))
-		copy(out, data)
-		return out
+		return data
 	}
 	out := make([]byte, n)
 	copy(out, data)
@@ -73,6 +70,7 @@ func flshPadTo256(data []byte) []byte {
 }
 
 // buildFlashImage assembles the FLSH container from the given images (in order).
+// Each image's data is padded to 4 bytes; the reported size is the padded size.
 func buildFlashImage(images []flshImage) []byte {
 	if len(images) == 0 {
 		return nil
@@ -80,38 +78,43 @@ func buildFlashImage(images []flshImage) []byte {
 
 	padded := make([][]byte, len(images))
 	for i, img := range images {
-		padded[i] = flshPadTo256(img.data)
+		padded[i] = flshPad4(img.data)
 	}
 
-	dataStart := flshHeaderSize + flshImageHdrSize*len(images)
-	offset := uint32(dataStart)
-
-	// Image headers.
-	hdrs := make([]byte, 0, flshImageHdrSize*len(images))
+	// Image-info table. image_offset is absolute from byte 0.
+	infoBase := flshHeaderSize + flshCksumSize + flshInfoSize*len(images)
+	offset := uint32(infoBase)
+	info := make([]byte, 0, flshInfoSize*len(images))
 	for i, img := range images {
-		var h [flshImageHdrSize]byte
-		binary.LittleEndian.PutUint32(h[0:4], img.id)
-		binary.LittleEndian.PutUint32(h[4:8], offset)
-		binary.LittleEndian.PutUint32(h[8:12], uint32(len(padded[i])))
-		binary.LittleEndian.PutUint32(h[12:16], flshChecksum(padded[i]))
-		// image_header_checksum covers all fields except itself (first 16 bytes).
-		binary.LittleEndian.PutUint32(h[16:20], flshChecksum(h[:16]))
-		hdrs = append(hdrs, h[:]...)
+		var e [flshInfoSize]byte
+		binary.LittleEndian.PutUint32(e[0:4], img.id)
+		binary.LittleEndian.PutUint32(e[4:8], offset)
+		binary.LittleEndian.PutUint32(e[8:12], uint32(len(padded[i])))
+		info = append(info, e[:]...)
 		offset += uint32(len(padded[i]))
 	}
 
-	// Flash header.
-	var fh [flshHeaderSize]byte
-	copy(fh[0:4], flshMagic)
-	binary.LittleEndian.PutUint16(fh[4:6], flshHeaderVersion)
-	binary.LittleEndian.PutUint16(fh[6:8], uint16(len(images)))
-	binary.LittleEndian.PutUint32(fh[8:12], uint32(flshHeaderSize))
-	// header_checksum covers all fields except itself (first 12 bytes).
-	binary.LittleEndian.PutUint32(fh[12:16], flshChecksum(fh[:12]))
+	// Header.
+	var hdr [flshHeaderSize]byte
+	copy(hdr[0:4], flshMagic)
+	binary.LittleEndian.PutUint16(hdr[4:6], flshHeaderVersion)
+	binary.LittleEndian.PutUint16(hdr[6:8], uint16(len(images)))
 
-	out := make([]byte, 0, dataStart)
-	out = append(out, fh[:]...)
-	out = append(out, hdrs...)
+	// Payload CRC covers the image-info table followed by all image data.
+	payloadCrc := crc32.NewIEEE()
+	payloadCrc.Write(info)
+	for _, p := range padded {
+		payloadCrc.Write(p)
+	}
+
+	var cks [flshCksumSize]byte
+	binary.LittleEndian.PutUint32(cks[0:4], flshCrc32(hdr[:]))
+	binary.LittleEndian.PutUint32(cks[4:8], payloadCrc.Sum32())
+
+	out := make([]byte, 0, offset)
+	out = append(out, hdr[:]...)
+	out = append(out, cks[:]...)
+	out = append(out, info...)
 	for _, p := range padded {
 		out = append(out, p...)
 	}
@@ -122,10 +125,10 @@ func cmdFlshImage(args []string) error {
 	fs := flag.NewFlagSet("flsh-image", flag.ExitOnError)
 	var caliptra, manifest, mcu, output string
 	var socImages repeatFlag
-	fs.StringVar(&caliptra, "caliptra", "", "Caliptra FW image (id 0)")
-	fs.StringVar(&manifest, "soc-manifest", "", "SoC (auth) manifest (id 1)")
-	fs.StringVar(&mcu, "mcu-runtime", "", "MCU runtime / BootMCU FMC (id 2)")
-	fs.Var(&socImages, "soc-image", "Additional SoC image ID:FILE (repeatable)")
+	fs.StringVar(&caliptra, "caliptra", "", "Caliptra FW image (id 0x0001)")
+	fs.StringVar(&manifest, "soc-manifest", "", "SoC (auth) manifest (id 0x0002)")
+	fs.StringVar(&mcu, "mcu-runtime", "", "MCU runtime / BootMCU FMC (id 0x0003)")
+	fs.Var(&socImages, "soc-image", "Additional SoC image FILE (repeatable; ids from 0x1000)")
 	fs.StringVar(&output, "output", "", "Output FLSH image file")
 	fs.StringVar(&output, "o", "", "Output FLSH image file")
 	fs.Parse(args)
@@ -159,18 +162,12 @@ func cmdFlshImage(args []string) error {
 			return err
 		}
 	}
-	for _, spec := range socImages {
-		parts := strings.SplitN(spec, ":", 2)
-		if len(parts) != 2 {
-			return fmt.Errorf("--soc-image must be ID:FILE, got: %s", spec)
-		}
-		id, err := strconv.ParseUint(parts[0], 0, 32)
-		if err != nil {
-			return fmt.Errorf("parse soc-image id %q: %w", parts[0], err)
-		}
-		if err := add(uint32(id), parts[1]); err != nil {
+	socID := uint32(flshIDSocImagesBase)
+	for _, path := range socImages {
+		if err := add(socID, path); err != nil {
 			return err
 		}
+		socID++
 	}
 
 	if len(images) == 0 {
@@ -183,14 +180,15 @@ func cmdFlshImage(args []string) error {
 	}
 
 	fmt.Println("=== AST2700-A2 FLSH image ===")
-	off := flshHeaderSize + flshImageHdrSize*len(images)
+	off := flshHeaderSize + flshCksumSize + flshInfoSize*len(images)
 	for _, im := range images {
-		psize := len(flshPadTo256(im.data))
-		fmt.Printf("  image id=%#010x offset=%#010x size=%#010x (%d raw)\n",
+		psize := len(flshPad4(im.data))
+		fmt.Printf("  image id=%#06x offset=%#010x size=%#010x (%d raw)\n",
 			im.id, off, psize, len(im.data))
 		off += psize
 	}
-	fmt.Printf("  image_count=%d total=%d bytes\n", len(images), len(img))
+	fmt.Printf("  image_count=%d header_crc=%#010x total=%d bytes\n",
+		len(images), flshCrc32(img[:8]), len(img))
 	fmt.Printf("  Output: %s\n", output)
 	return nil
 }
