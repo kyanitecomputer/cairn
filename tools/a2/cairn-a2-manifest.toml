@@ -1,0 +1,118 @@
+# Licensed under the Apache-2.0 license
+#
+# AST2700-A2 Caliptra SoC auth-manifest configuration for cairn.
+#
+# Consumed by the vendor cptra_imgtool (`create-auth-man-2x`) to produce the
+# ATMN SoC manifest, whose Image-Metadata-Collection carries the SHA-384 digest
+# of each image the BootMCU authorizes via Caliptra AUTHORIZE_AND_STASH. Our
+# imgtool then stitches the FLSH container (see gen-a2-image.sh).
+#
+# Keys: the AST2700 dev board is unprovisioned, so the cptra_imgtool default dev
+# keys (key/ast2700-default) are used for both vendor and owner slots; flags=0
+# (metadata vendor signature not required), PQC = LMS.
+#
+# Load addresses/stages are provisional and finalised with the A2 BootMCU port:
+#   load_stage 0 = IO-die/BootMCU-stage prebuilts, 2 = CA35 payload.
+
+[manifest_config]
+version = 1
+flags = 0
+security_version = 1
+prj_name = "cairn-a2"
+
+[vendor_fw_key_config]
+ecc_pub_key = "vnd-fw-ecc-pubk.pem"
+ecc_priv_key = "vnd-fw-ecc-prvk.pem"
+lms_pub_key = "vnd-fw-lms-pubk.pem"
+lms_priv_key = "vnd-fw-lms-prvk.pem"
+
+[vendor_man_key_config]
+ecc_pub_key = "vnd-man-ecc-pubk.pem"
+ecc_priv_key = "vnd-man-ecc-prvk.pem"
+lms_pub_key = "vnd-man-lms-pubk.pem"
+lms_priv_key = "vnd-man-lms-prvk.pem"
+
+[owner_fw_key_config]
+ecc_pub_key = "own-fw-ecc-pubk.pem"
+ecc_priv_key = "own-fw-ecc-prvk.pem"
+lms_pub_key = "own-fw-lms-pubk.pem"
+lms_priv_key = "own-fw-lms-prvk.pem"
+
+[owner_man_key_config]
+ecc_pub_key = "own-man-ecc-pubk.pem"
+ecc_priv_key = "own-man-ecc-prvk.pem"
+lms_pub_key = "own-man-lms-pubk.pem"
+lms_priv_key = "own-man-lms-prvk.pem"
+
+[image_runtime_list]
+caliptra_file = "caliptra-fw.bin"
+# MCU runtime (BootMCU FMC): the vendor A2 binary today; replace with our own
+# aspeed-mcu-runtime A2 build once ported.
+mcu_file = "ast2700-mcu-runtime.bin"
+
+# --- MCU runtime (FMC) ---
+[[image_metadata_list]]
+file = "ast2700-mcu-runtime.bin"
+source = 1
+fw_id = 1
+ignore_auth_check = false
+load_stage = 0
+svn = 1
+
+# --- DRAM PHY training + DisplayPort prebuilts ---
+[[image_metadata_list]]
+file = "ddr4_pmu_train_imem.bin"
+source = 1
+fw_id = 2
+ignore_auth_check = false
+load_stage = 0
+
+[[image_metadata_list]]
+file = "ddr4_pmu_train_dmem.bin"
+source = 1
+fw_id = 3
+ignore_auth_check = false
+load_stage = 0
+
+[[image_metadata_list]]
+file = "ddr4_2d_pmu_train_imem.bin"
+source = 1
+fw_id = 4
+ignore_auth_check = false
+load_stage = 0
+
+[[image_metadata_list]]
+file = "ddr4_2d_pmu_train_dmem.bin"
+source = 1
+fw_id = 5
+ignore_auth_check = false
+load_stage = 0
+
+[[image_metadata_list]]
+file = "ddr5_pmu_train_imem.bin"
+source = 1
+fw_id = 6
+ignore_auth_check = false
+load_stage = 0
+
+[[image_metadata_list]]
+file = "ddr5_pmu_train_dmem.bin"
+source = 1
+fw_id = 7
+ignore_auth_check = false
+load_stage = 0
+
+[[image_metadata_list]]
+file = "dp_fw.bin"
+source = 1
+fw_id = 8
+ignore_auth_check = false
+load_stage = 0
+
+# --- CA35 payload (cairn) ---
+[[image_metadata_list]]
+file = "cairn.raw.bin"
+source = 1
+fw_id = 9
+ignore_auth_check = false
+load_stage = 2
