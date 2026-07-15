@@ -30,7 +30,15 @@ GOARCH  = arm64
 GOOS    = tamago
 GOOSPKG = github.com/usbarmory/tamago
 
-GOENV = GOOS=$(GOOS) GOARCH=$(GOARCH) GOOSPKG=$(GOOSPKG) GOTOOLCHAIN=local
+# GOARM64 pins the ARMv8 baseline. The AST2700 CA35 cores are Cortex-A35, which
+# implement ARMv8.0-A and do NOT provide FEAT_LSE (large-system atomics). Pin it
+# explicitly to v8.0 so the compiler never emits LSE instructions (CAS/LDADD/…),
+# which are UNDEFINED on this core and trap synchronously. Do not rely on the
+# toolchain default: go1.27 keeps it at v8.0, but a future bump to v8.1+ would
+# silently emit unconditional LSE atomics and brick the CA35 payload.
+GOARM64 = v8.0
+
+GOENV = GOOS=$(GOOS) GOARCH=$(GOARCH) GOARM64=$(GOARM64) GOOSPKG=$(GOOSPKG) GOTOOLCHAIN=local
 
 # Platform directory: entry point + platform code.
 TARGET = target/ast2700-dcscm-evb
