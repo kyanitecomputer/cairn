@@ -49,6 +49,12 @@ MANIFEST_TOOL="$CPTRA_IMGTOOL/target/release/caliptra-auth-manifest-app-2x"
 
 mkdir -p "$OUT" "$STAGE"
 
+# Remove any previous image up front. With `set -e`, a failure in an earlier
+# step (e.g. a missing prebuilt) aborts before the stitch step, and without this
+# the old image would remain in place looking freshly built — a flash programmer
+# then re-flashes stale firmware. Deleting it makes such failures unmistakable.
+rm -f "$OUT/cairn_ast2700_a2.bin"
+
 echo "==> 1/4 build cairn CA35 payload"
 ( cd "$CAIRN" && TAMAGO="$TAMAGO" make build )
 llvm-objcopy -O binary "$CAIRN/bin/cairn.elf" "$STAGE/cairn.raw.bin"
@@ -57,12 +63,19 @@ echo "==> 2/4 build imgtools (host)"
 ( cd "$CAIRN/tools/imgtools" && GOWORK=off "$TAMAGO" build -o "$IMGTOOLS" . )
 
 echo "==> 3/4 stage prebuilts + generate SoC manifest (cptra_imgtool)"
-for f in caliptra-fw.bin ast2700-mcu-runtime.bin \
+for f in caliptra-fw.bin \
          ddr4_pmu_train_imem.bin ddr4_pmu_train_dmem.bin \
          ddr4_2d_pmu_train_imem.bin ddr4_2d_pmu_train_dmem.bin \
          ddr5_pmu_train_imem.bin ddr5_pmu_train_dmem.bin dp_fw.bin; do
 	cp "$PREBUILT/$f" "$STAGE/$f"
 done
+
+# The MCU runtime (BootMCU FMC, FLSH id 3). Defaults to the vendor binary; set
+# MCU_RUNTIME_BIN to our own aspeed-mcu-runtime FMC (built for A2, linked at
+# 0x14B80000) to run the cairn Rust BootMCU instead of vendor Zephyr.
+MCU_RUNTIME_BIN="${MCU_RUNTIME_BIN:-$PREBUILT/ast2700-mcu-runtime.bin}"
+cp "$MCU_RUNTIME_BIN" "$STAGE/ast2700-mcu-runtime.bin"
+echo "    MCU runtime: $MCU_RUNTIME_BIN"
 
 if [ ! -x "$MANIFEST_TOOL" ]; then
 	echo "ERROR: manifest tool not built: $MANIFEST_TOOL" >&2
