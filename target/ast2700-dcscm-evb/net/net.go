@@ -104,6 +104,19 @@ func Init(nic netdev.DevEthernet, mac [6]byte, hostname string) error {
 }
 
 func run(mac [6]byte) {
+	// Configure the runner before Run. The FTGMAC NIC is poll-driven (see
+	// EthPoll usage), so it runs in RunnerInterfacePoll mode with an idle
+	// backoff. Without this the runner has a nil backoff strategy and faults on
+	// the first idle poll iteration.
+	if err := runner.Configure(netdev.RunnerConfig[struct{}]{
+		Buffers: iface.RunnerBuffers(4),
+		Backoff: backoff,
+		Flags:   netdev.RunnerInterfacePoll,
+	}); err != nil {
+		fmt.Printf("Network runner configure failed: %v\n", err)
+		return
+	}
+
 	go func() {
 		if err := runner.Run(context.Background(), &iface, &nstack); err != nil {
 			fmt.Printf("Network runner stopped: %v\n", err)
