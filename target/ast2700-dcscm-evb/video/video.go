@@ -15,6 +15,7 @@ package video
 
 import (
 	"fmt"
+	"time"
 	"unsafe"
 
 	"github.com/kyanitecomputer/aspeed-go/hal/aspeedgfx"
@@ -22,6 +23,12 @@ import (
 	"github.com/kyanitecomputer/aspeed-go/hal/framebuffer"
 	"github.com/usbarmory/tamago/soc/aspeed/ast2700"
 )
+
+// dpReadyTimeout bounds how long we wait for the DPMCU to report the DP link
+// ready after programming an EDID-derived mode before falling back to the
+// known-good 800x600. A real monitor's DPMCU link training completes well
+// within this window; exceeding it means the mode cannot be carried.
+const dpReadyTimeout = 2 * time.Second
 
 const videoBytesPerPixel = 4
 
@@ -116,11 +123,7 @@ func bringUpMode(mode aspeedgfx.Mode, reacquire bool) {
 		gfxCtl.Disable()
 	}
 
-	if !aspeedgfx.ConfigureCRT(mode) {
-		fmt.Printf("GFX: pixel clock for %dx%d unsupported, using 800x600\n", mode.Width, mode.Height)
-		mode = aspeedgfx.Mode800x600
-		aspeedgfx.ConfigureCRT(mode)
-	}
+	mode = programMode(mode)
 
 	fb := framebuffer.New(framebuffer.Config{
 		Width:    mode.Width,
@@ -139,6 +142,37 @@ func bringUpMode(mode aspeedgfx.Mode, reacquire bool) {
 	// the display at the new geometry.
 	con = newFBConsole(fb, conScale)
 	curMode = mode
+}
+
+// programMode configures the CRT clock/timing and DPMCU DISPLAY_FORMAT for mode
+// and confirms the DP link comes ready. For an EDID-derived mode the DPMCU link
+// cannot carry (link training never completes), or a mode whose pixel clock is
+// unrepresentable, it falls back to the known-good 800x600 rather than leaving
+// the panel blank. It returns the mode actually programmed.
+//
+// The 800x600 mode is hardware-validated, so it is programmed unconditionally
+// without probing DP readiness. This keeps the no-cable / no-EDID path (which
+// already resolves to 800x600 in pickMode) fast and unconditional.
+func programMode(mode aspeedgfx.Mode) aspeedgfx.Mode {
+	if !aspeedgfx.ConfigureCRT(mode) {
+		fmt.Printf("GFX: pixel clock for %dx%d unsupported, using 800x600\n", mode.Width, mode.Height)
+		return fallbackMode()
+	}
+	if mode.ModeIndex == aspeedgfx.ASTDP_800x600_60 {
+		return mode
+	}
+	if aspeedgfx.WaitDPReady(dpReadyTimeout) {
+		return mode
+	}
+	fmt.Printf("GFX: DP link not ready for %dx%d, falling back to 800x600\n", mode.Width, mode.Height)
+	return fallbackMode()
+}
+
+// fallbackMode programs the known-good 800x600 mode and returns it.
+func fallbackMode() aspeedgfx.Mode {
+	mode := aspeedgfx.Mode800x600
+	aspeedgfx.ConfigureCRT(mode)
+	return mode
 }
 
 // flushFramebuffer writes the framebuffer back to DRAM so the GFX scanout DMA
