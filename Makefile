@@ -54,6 +54,14 @@ ALIGN        = 0x1000
 BOARD_TAG ?= ast2700dcscm
 TAGS       = linkcpuinit,$(BOARD_TAG)
 
+# Set VIDEO=1 to compile in the DisplayPort framebuffer console. This enables
+# the ast2700video feature and redirects the runtime printk hook onto the
+# on-screen console via linkprintk (the board package's own printk must be
+# disabled, which linkprintk does).
+ifeq ($(VIDEO),1)
+TAGS := $(TAGS),ast2700video,linkprintk
+endif
+
 # ---------------------------------------------------------------------------
 # Output
 # ---------------------------------------------------------------------------

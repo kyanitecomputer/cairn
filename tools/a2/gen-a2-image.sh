@@ -56,7 +56,8 @@ mkdir -p "$OUT" "$STAGE"
 rm -f "$OUT/cairn_ast2700_a2.bin"
 
 echo "==> 1/4 build cairn CA35 payload"
-( cd "$CAIRN" && TAMAGO="$TAMAGO" make build )
+# Forward VIDEO=1 to enable the DisplayPort framebuffer console in the payload.
+( cd "$CAIRN" && TAMAGO="$TAMAGO" VIDEO="${VIDEO:-}" make build )
 llvm-objcopy -O binary "$CAIRN/bin/cairn.elf" "$STAGE/cairn.raw.bin"
 
 echo "==> 2/4 build imgtools (host)"
