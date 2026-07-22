@@ -37,6 +37,9 @@ import (
 	// Baseboard-management driver (stub implementation of pkg/bmcdev.Chassis).
 	"src.kyanite.computer/cairn/target/ast2700-dcscm-evb/chassis"
 
+	// Interactive serial console (core/console engine over UART12).
+	sercon "src.kyanite.computer/cairn/target/ast2700-dcscm-evb/console"
+
 	// Hardware-agnostic management contract.
 	"src.kyanite.computer/cairn/pkg/bmcdev"
 
@@ -135,6 +138,11 @@ func main() {
 	// owned; the operator never appends to it.
 	svcs := []operator.Service{
 		operator.PermanentFunc("heartbeat", heartbeatLoop),
+		operator.PermanentFunc("console", sercon.Service(sercon.Options{
+			Cfg:     cfg,
+			Chassis: board2700,
+			Start:   startTime,
+		})),
 	}
 
 	// The management plane is a supervised child when it came up.
