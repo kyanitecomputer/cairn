@@ -259,9 +259,11 @@ func initMgmt() {
 	slog.Info("mgmt: management plane up (in-process NATS + auth callout)")
 }
 
-// heartbeatLoop is a supervised placeholder service: it periodically logs
-// uptime and chassis power state, demonstrating the operator/service pattern
-// until real management loops replace it. It returns promptly on ctx cancel.
+// heartbeatLoop is a supervised placeholder service: it periodically polls for
+// monitor hotplug and publishes uptime/power over the authorized bus, exercising
+// the operator/service and LOCAL auth patterns until real management loops
+// replace it. It does not log to the console — the interactive shell is the
+// liveness signal — and returns promptly on ctx cancel.
 func heartbeatLoop(ctx context.Context) error {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
@@ -272,17 +274,14 @@ func heartbeatLoop(ctx context.Context) error {
 		case <-ticker.C:
 			// Re-acquire the display on monitor hotplug (no-op without video).
 			video.PollHotplug()
-			var power bmcdev.PowerState
-			if board2700 != nil {
-				power = board2700.Power()
-			}
-			uptime := time.Since(startTime).Round(time.Second)
-			slog.Info("heartbeat",
-				slog.Duration("uptime", uptime),
-				slog.String("power", power.String()))
 			// Publish over the authorized bus when the management plane is up,
 			// exercising the LOCAL auth path end to end.
 			if beatConn != nil {
+				var power bmcdev.PowerState
+				if board2700 != nil {
+					power = board2700.Power()
+				}
+				uptime := time.Since(startTime).Round(time.Second)
 				_ = beatConn.Publish(heartbeatSubject,
 					[]byte(fmt.Sprintf("uptime=%s power=%s", uptime, power)))
 			}
