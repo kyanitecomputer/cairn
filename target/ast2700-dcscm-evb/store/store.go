@@ -38,13 +38,22 @@ const DefaultNORSize = 64 << 20
 //     is ~1k erases, and it matches the management-plane RAM store budget.
 const RegionSize = 4 << 20
 
+// addr24BitLimit is the highest address reachable with the 3-byte (24-bit)
+// SPI addressing the aspeed-go spinor driver currently emits. On a 64 MB chip
+// any access at or above this wraps modulo 16 MB and silently lands inside the
+// boot image (the firmware occupies the low ~16 MB of the same FMC NOR),
+// corrupting the CA35 payload. Until the driver gains 4-byte addressing there
+// is no free region above the image to host the store, so Open refuses rather
+// than corrupt and the caller falls back to the RAM-backed store.
+const addr24BitLimit = 1 << 24
+
 // Open initialises the FMC SPI NOR and returns a Scree block device backed by a
 // dedicated region at the top of the chip. size is the NOR capacity in bytes
 // (use DefaultNORSize for the DC-SCM board).
 //
 // The volume is mounted if a valid one is already present; only a fresh or
-// corrupt region is (re)formatted. This persists state across reboots and,
-// critically, avoids re-erasing the region on every boot.
+// corrupt region is (re)formatted, so reboots do not re-erase the region and
+// state persists across boots.
 func Open(size int64) (blkdev.BlockDevice, error) {
 	ctl := &spi.Controller{Base: spi.AST2700FMCBase, WindowBase: spi.AST2700FMCWindow, MaxCS: 3}
 	if err := ctl.Init(); err != nil {
@@ -67,6 +76,12 @@ func Open(size int64) (blkdev.BlockDevice, error) {
 		regionSize = size
 	}
 	regionBase := size - regionSize
+
+	// Refuse if the region is not fully reachable with the driver's 24-bit
+	// addressing; wrapping would corrupt the boot image (see addr24BitLimit).
+	if regionBase+regionSize > addr24BitLimit {
+		return nil, fmt.Errorf("store: region [%#x,%#x) exceeds 24-bit SPI addressing; flash store needs 4-byte addressing", regionBase, regionBase+regionSize)
+	}
 
 	dev, err := blkdev.NewNOR(screeNOR{nor: nor, base: regionBase, size: regionSize})
 	if err != nil {

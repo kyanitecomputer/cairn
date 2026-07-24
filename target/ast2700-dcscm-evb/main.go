@@ -311,7 +311,11 @@ func printStatus() {
 	fmt.Println("  [x] Config manager           (RAM-backed; SPI-NOR pending)")
 	fmt.Println("  [x] Chassis driver           (stub; hardware pending)")
 	fmt.Println("  [x] Network                  (FTGMAC + lneto → net.SocketFunc)")
-	fmt.Println("  [x] Storage                  (Scree over FMC SPI NOR)")
+	if storeReady {
+		fmt.Println("  [x] Storage                  (Scree over FMC SPI NOR)")
+	} else {
+		fmt.Println("  [x] Storage                  (RAM-backed; FMC NOR pending 4-byte addressing)")
+	}
 	fmt.Println("  [x] Management plane         (in-process NATS + auth callout)")
 	fmt.Println("  [x] Heartbeat                (supervised; publishes over bus)")
 	fmt.Println()
