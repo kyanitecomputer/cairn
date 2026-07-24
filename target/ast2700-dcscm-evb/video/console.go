@@ -143,6 +143,15 @@ func (c *fbConsole) flushRows(y, h int) {
 // replaces the board package's printk, which must be disabled with the
 // `linkprintk` build tag when this console is compiled in.
 //
+// SCOPE (documented, fuller work later): this only mirrors output that flows
+// through the Go runtime's printk — i.e. the system logs (slog/telemetry and
+// package prints). The interactive shell (the `cairn#` prompt, echoed
+// keystrokes, and command output such as the `display` dumps) is written by the
+// console service directly to its serial reader/writer and does NOT pass through
+// printk, so it appears on the serial console only, not on the framebuffer.
+// Mirroring the interactive shell onto the framebuffer is deferred to the
+// planned `display`/shell console work.
+//
 //go:linkname printk runtime/goos.Printk
 func printk(b byte) {
 	if b == '\n' {
