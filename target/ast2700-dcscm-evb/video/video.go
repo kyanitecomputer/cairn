@@ -15,6 +15,7 @@ package video
 
 import (
 	"fmt"
+	"strings"
 	"time"
 	"unsafe"
 
@@ -22,6 +23,8 @@ import (
 	"github.com/kyanitecomputer/aspeed-go/hal/edid"
 	"github.com/kyanitecomputer/aspeed-go/hal/framebuffer"
 	"github.com/usbarmory/tamago/soc/aspeed/ast2700"
+
+	"src.kyanite.computer/core/console"
 )
 
 // dpReadyTimeout bounds how long we wait for the DPMCU to report the DP link
@@ -179,4 +182,40 @@ func fallbackMode() aspeedgfx.Mode {
 // (a non-coherent DRAM master) observes the pixels the CA35 wrote.
 func flushFramebuffer(fb *framebuffer.Framebuffer) {
 	ast2700.ARM.CleanDataCacheRange(fb.Addr, uintptr(len(fb.Buf)))
+}
+
+// Commands returns the display bring-up console commands. It is only present in
+// the video-enabled build; the default build's stub returns nil.
+func Commands() []console.Command {
+	return []console.Command{displayCmd()}
+}
+
+// displayCmd dumps GFX/DP/DPMCU register state for display bring-up. It reports
+// the hot-plug-detect level, whether the BootMCU has released the DPMCU core,
+// the DP link-ready scratch codes, and the CRT scanout timing/address so a
+// black panel can be diagnosed from the serial console.
+func displayCmd() console.Command {
+	return console.Command{
+		Name: "display",
+		Help: "display — dump GFX/DP/DPMCU state (video bring-up)",
+		Run: func([]string) (string, error) {
+			if gfxCtl == nil {
+				return "display not initialised", nil
+			}
+			st := gfxCtl.Status()
+			var b strings.Builder
+			fmt.Fprintf(&b, "mode:      %dx%d  HPD=%v  DPMCU_running=%v  DP_ready=%v\n",
+				curMode.Width, curMode.Height, aspeedgfx.HPDAsserted(), aspeedgfx.DPMCURunning(), st.DPReady)
+			fmt.Fprintf(&b, "GFX:       ctrl1=%08x ctrl2=%08x status=%08x addr=%08x offset=%08x\n",
+				st.Ctrl1, st.Ctrl2, st.CRTCStatus, st.Addr, st.Offset)
+			fmt.Fprintf(&b, "GFX time:  horiz0=%08x horiz1=%08x vert0=%08x vert1=%08x\n",
+				st.Horiz0, st.Horiz1, st.Vert0, st.Vert1)
+			fmt.Fprintf(&b, "DP:        version=%08x source=%08x dpmcu_de0=%08x redrv=%08x\n",
+				st.DPVersion, st.DPSource, st.DPMCU, st.ReDriver)
+			fmt.Fprintf(&b, "DPMCU:     ctrl=%08x int=%08x\n", st.DPMCUCtrl, st.DPMCUInt)
+			fmt.Fprintf(&b, "DP ready:  scu_dac=%08x pcie0=%08x(code=%02x) pcie1=%08x(code=%02x)",
+				st.SCUDAC, st.PCIE0DP, (st.PCIE0DP>>8)&0xff, st.PCIE1DP, (st.PCIE1DP>>8)&0xff)
+			return b.String(), nil
+		},
+	}
 }

@@ -142,6 +142,7 @@ func main() {
 			Cfg:     cfg,
 			Chassis: board2700,
 			Start:   startTime,
+			Extra:   video.Commands(),
 		})),
 	}
 

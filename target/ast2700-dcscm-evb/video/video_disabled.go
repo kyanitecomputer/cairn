@@ -6,8 +6,13 @@
 
 package video
 
+import "src.kyanite.computer/core/console"
+
 // Init is a no-op unless the ast2700video build tag is set.
 func Init() {}
 
 // PollHotplug is a no-op unless the ast2700video build tag is set.
 func PollHotplug() {}
+
+// Commands returns no console commands unless the ast2700video build tag is set.
+func Commands() []console.Command { return nil }

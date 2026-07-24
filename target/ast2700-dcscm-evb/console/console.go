@@ -36,20 +36,26 @@ type Options struct {
 	Cfg     *config.Manager
 	Chassis bmcdev.Chassis
 	Start   time.Time // process start, for uptime
+
+	// Extra registers additional target commands (e.g. the video bring-up
+	// commands, present only in the ast2700video build).
+	Extra []console.Command
 }
 
 // Service returns a supervised service function that runs the interactive
 // console on UART12. It never returns under normal operation.
 func Service(opt Options) func(ctx context.Context) error {
+	cmds := []console.Command{
+		showCmd(opt),
+		powerCmd(opt),
+		mdCmd(),
+		mwCmd(),
+	}
+	cmds = append(cmds, opt.Extra...)
 	sh := console.New(console.Config{
-		Prompt: "cairn# ",
-		Banner: "Cairn BMC console",
-		Commands: []console.Command{
-			showCmd(opt),
-			powerCmd(opt),
-			mdCmd(),
-			mwCmd(),
-		},
+		Prompt:   "cairn# ",
+		Banner:   "Cairn BMC console",
+		Commands: cmds,
 	})
 	return func(ctx context.Context) error {
 		sh.Run(&uartRW{})
