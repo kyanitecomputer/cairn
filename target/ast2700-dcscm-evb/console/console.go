@@ -78,6 +78,12 @@ func showCmd(opt Options) console.Command {
 	return console.Command{
 		Name: "show",
 		Help: "show system — system info (hostname, IP, MAC, uptime)",
+		Complete: func(prev []string, _ string) []string {
+			if len(prev) == 0 {
+				return []string{"system"}
+			}
+			return nil
+		},
 		Run: func(args []string) (string, error) {
 			if len(args) == 0 || args[0] != "system" && args[0] != "sys" {
 				return "usage: show system", nil
@@ -100,6 +106,12 @@ func powerCmd(opt Options) console.Command {
 	return console.Command{
 		Name: "power",
 		Help: "power on|off|status — host chassis power control",
+		Complete: func(prev []string, _ string) []string {
+			if len(prev) == 0 {
+				return []string{"on", "off", "status"}
+			}
+			return nil
+		},
 		Run: func(args []string) (string, error) {
 			if len(args) != 1 {
 				return "usage: power on|off|status", nil
