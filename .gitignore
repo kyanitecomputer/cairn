@@ -2,6 +2,9 @@
 /bin/
 /out/
 
+# Facet SPA output injected by the Dagger UI build (facetui tag); never committed.
+/target/ast2700-dcscm-evb/webui/build/
+
 # Stray target-named build output at repo root
 /ast2700-dcscm-evb
 

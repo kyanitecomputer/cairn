@@ -57,6 +57,9 @@ import (
 	// Optional DisplayPort console (built only with the ast2700video tag).
 	"src.kyanite.computer/cairn/target/ast2700-dcscm-evb/video"
 
+	// Optional HTTPS facet web UI (:443 + :80 redirect).
+	"src.kyanite.computer/cairn/target/ast2700-dcscm-evb/webui"
+
 	// slog/telemetry.
 	"src.kyanite.computer/core/telemetry"
 
@@ -77,6 +80,21 @@ import (
 // board has 1 GB DRAM; cap the Go heap to leave headroom for the (future)
 // management-plane budget.
 const cairnMemoryLimit = 256 * 1024 * 1024
+
+// platform is the central switch operators flip to include or omit optional
+// management surfaces for this build/target. Serving the facet web UI further
+// requires bundling it at build time (the `facetui` tag); when WebUI is enabled
+// but the SPA is not bundled, the :443 server runs but has no UI to serve.
+type platform struct {
+	SSH   bool // SSH management console on :22
+	WebUI bool // HTTPS facet web UI on :443 (+ :80 redirect)
+}
+
+// enabled is this target's feature selection.
+var enabled = platform{
+	SSH:   true,
+	WebUI: true,
+}
 
 // startTime is set at the start of main() for uptime calculation.
 var startTime time.Time
@@ -147,8 +165,16 @@ func main() {
 
 	// SSH management server (port 22), sharing the console command set over an
 	// encrypted channel. Non-fatal if it cannot start; serial console remains.
-	if svc, ok := initSSH(); ok {
-		svcs = append(svcs, svc)
+	if enabled.SSH {
+		if svc, ok := initSSH(); ok {
+			svcs = append(svcs, svc)
+		}
+	}
+
+	// HTTPS facet web UI on :443 with an HTTP→HTTPS redirect on :80. Non-fatal
+	// if the certificate cannot be materialised.
+	if enabled.WebUI {
+		svcs = append(svcs, initWebUI()...)
 	}
 
 	// The management plane is a supervised child when it came up.
@@ -300,6 +326,31 @@ func initSSH() (operator.Service, bool) {
 	}), true
 }
 
+// initWebUI builds the HTTPS web-UI server and returns it as supervised
+// services (HTTPS on :443 and an HTTP→HTTPS redirect on :80). It serves the
+// facet SPA when bundled (facetui build tag) and otherwise runs with no UI
+// resource. Returns nil (no services) if the TLS certificate cannot be
+// materialised; the node keeps running without the web UI.
+func initWebUI() []operator.Service {
+	if !webui.Bundled() {
+		slog.Info("webui: facet SPA not bundled (build with -tags facetui) — web UI disabled")
+		return nil
+	}
+	srv, err := webui.New(webui.Options{
+		Store: configStore,
+		Hosts: []string{cfg.Hostname(), cfg.MgmtIP().Addr().String()},
+	})
+	if err != nil {
+		slog.Error("webui: server init failed — web UI disabled", "err", err)
+		return nil
+	}
+	slog.Info("webui: HTTPS server registered (port 443, facet SPA bundled)")
+	return []operator.Service{
+		operator.PermanentFunc("https", srv.HTTPS),
+		operator.PermanentFunc("http-redirect", srv.Redirect),
+	}
+}
+
 // heartbeatLoop is a supervised placeholder service: it periodically polls for
 // monitor hotplug and publishes uptime/power over the authorized bus, exercising
 // the operator/service and LOCAL auth patterns until real management loops
@@ -359,6 +410,9 @@ func printStatus() {
 	}
 	fmt.Println("  [x] Management plane         (in-process NATS + auth callout)")
 	fmt.Println("  [x] SSH console              (port 22; shares BMC command set)")
+	if enabled.WebUI && webui.Bundled() {
+		fmt.Println("  [x] Web UI                   (HTTPS :443 + :80 redirect; facet bundled)")
+	}
 	fmt.Println("  [x] Heartbeat                (supervised; publishes over bus)")
 	fmt.Println()
 }
