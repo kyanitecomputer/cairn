@@ -25,6 +25,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/netip"
 	"runtime"
@@ -64,6 +65,9 @@ import (
 	"src.kyanite.computer/core/bus"
 	"src.kyanite.computer/core/mgmt"
 	"src.kyanite.computer/core/natscore"
+
+	// SSH management server (shared core/sshd bridged to the core/console shell).
+	"src.kyanite.computer/core/sshd"
 
 	// Microkernel assembly: declarative service set supervised together.
 	"src.kyanite.computer/core/operator"
@@ -138,12 +142,13 @@ func main() {
 	// owned; the operator never appends to it.
 	svcs := []operator.Service{
 		operator.PermanentFunc("heartbeat", heartbeatLoop),
-		operator.PermanentFunc("console", sercon.Service(sercon.Options{
-			Cfg:     cfg,
-			Chassis: board2700,
-			Start:   startTime,
-			Extra:   video.Commands(),
-		})),
+		operator.PermanentFunc("console", sercon.Service(consoleOptions())),
+	}
+
+	// SSH management server (port 22), sharing the console command set over an
+	// encrypted channel. Non-fatal if it cannot start; serial console remains.
+	if svc, ok := initSSH(); ok {
+		svcs = append(svcs, svc)
 	}
 
 	// The management plane is a supervised child when it came up.
@@ -260,6 +265,41 @@ func initMgmt() {
 	slog.Info("mgmt: management plane up (in-process NATS + auth callout)")
 }
 
+// consoleOptions builds the console command surface shared by the serial
+// console and the SSH server, so both expose the identical cairn command set.
+func consoleOptions() sercon.Options {
+	return sercon.Options{
+		Cfg:     cfg,
+		Chassis: board2700,
+		Start:   startTime,
+		Extra:   video.Commands(),
+	}
+}
+
+// initSSH builds the SSH management server (port 22) and returns it as a
+// supervised service. The server generates (or loads) an Ed25519 host key from
+// the config store and authenticates with the stored password (default:
+// "admin"). Each session gets its own console shell instance over the SSH
+// channel. If the server cannot be created it returns ok=false, and SSH is
+// disabled while the serial console remains available.
+func initSSH() (operator.Service, bool) {
+	opt := consoleOptions()
+	srv, err := sshd.New(configStore, func(rw io.ReadWriter) {
+		// Fresh shell per session: console.Shell carries per-session line and
+		// history state and is not safe to share across concurrent sessions.
+		sercon.NewShell(opt).Run(rw)
+	})
+	if err != nil {
+		slog.Error("ssh: server init failed — serial console still available", "err", err)
+		return operator.Service{}, false
+	}
+	slog.Info("ssh: management server registered (port 22, Ed25519, password auth)")
+	return operator.PermanentFunc("ssh", func(context.Context) error {
+		srv.ListenAndServe(22)
+		return nil // unreachable on hardware; restart if the listener exits
+	}), true
+}
+
 // heartbeatLoop is a supervised placeholder service: it periodically polls for
 // monitor hotplug and publishes uptime/power over the authorized bus, exercising
 // the operator/service and LOCAL auth patterns until real management loops
@@ -318,6 +358,7 @@ func printStatus() {
 		fmt.Println("  [x] Storage                  (RAM-backed; FMC NOR pending 4-byte addressing)")
 	}
 	fmt.Println("  [x] Management plane         (in-process NATS + auth callout)")
+	fmt.Println("  [x] SSH console              (port 22; shares BMC command set)")
 	fmt.Println("  [x] Heartbeat                (supervised; publishes over bus)")
 	fmt.Println()
 }

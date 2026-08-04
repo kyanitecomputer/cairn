@@ -42,9 +42,12 @@ type Options struct {
 	Extra []console.Command
 }
 
-// Service returns a supervised service function that runs the interactive
-// console on UART12. It never returns under normal operation.
-func Service(opt Options) func(ctx context.Context) error {
+// NewShell builds a cairn BMC console shell from opt. Each call returns an
+// independent shell instance carrying its own line-editing and history state;
+// callers that serve concurrent transports (e.g. one shell per SSH session)
+// must build a fresh shell per connection, as [console.Shell] is not safe to
+// share across concurrent sessions.
+func NewShell(opt Options) *console.Shell {
 	cmds := []console.Command{
 		showCmd(opt),
 		powerCmd(opt),
@@ -52,11 +55,17 @@ func Service(opt Options) func(ctx context.Context) error {
 		mwCmd(),
 	}
 	cmds = append(cmds, opt.Extra...)
-	sh := console.New(console.Config{
+	return console.New(console.Config{
 		Prompt:   "cairn# ",
 		Banner:   "Cairn BMC console",
 		Commands: cmds,
 	})
+}
+
+// Service returns a supervised service function that runs the interactive
+// console on UART12. It never returns under normal operation.
+func Service(opt Options) func(ctx context.Context) error {
+	sh := NewShell(opt)
 	return func(ctx context.Context) error {
 		sh.Run(&uartRW{})
 		return nil // unreachable on hardware; restart if the loop ever exits
