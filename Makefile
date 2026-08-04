@@ -62,6 +62,15 @@ ifeq ($(VIDEO),1)
 TAGS := $(TAGS),ast2700video,linkprintk
 endif
 
+# FACETUI=1 (or TAGS_EXTRA=facetui) embeds the facet SPA bundle in the web UI.
+# The Dagger UI build populates target/.../webui/build/ before enabling this.
+ifeq ($(FACETUI),1)
+TAGS := $(TAGS),facetui
+endif
+ifneq ($(TAGS_EXTRA),)
+TAGS := $(TAGS),$(TAGS_EXTRA)
+endif
+
 # ---------------------------------------------------------------------------
 # Output
 # ---------------------------------------------------------------------------

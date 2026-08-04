@@ -56,12 +56,24 @@ mkdir -p "$OUT" "$STAGE"
 rm -f "$OUT/cairn_ast2700_a2.bin"
 
 echo "==> 1/4 build cairn CA35 payload"
-# Forward VIDEO=1 to enable the DisplayPort framebuffer console in the payload.
-( cd "$CAIRN" && TAMAGO="$TAMAGO" VIDEO="${VIDEO:-}" make build )
-llvm-objcopy -O binary "$CAIRN/bin/cairn.elf" "$STAGE/cairn.raw.bin"
+# Forward VIDEO=1 (framebuffer console) and FACETUI=1 (embed the facet SPA).
+CAIRN_TAGS=""
+if [ -n "${FACETUI:-}" ]; then
+	CAIRN_TAGS="facetui"
+fi
+( cd "$CAIRN" && TAMAGO="$TAMAGO" VIDEO="${VIDEO:-}" TAGS_EXTRA="$CAIRN_TAGS" make build )
+llvm-objcopy -O binary "$CAIRN/bin/cairn.elf" "$STAGE/cairn.payload.bin"
 
 echo "==> 2/4 build imgtools (host)"
 ( cd "$CAIRN/tools/imgtools" && GOWORK=off "$TAMAGO" build -o "$IMGTOOLS" . )
+
+# Prefix the CA35 payload with the 16-byte boot header carrying the entry
+# offset, so the BootMCU jumps to _rt0 without a hardcoded constant. cairn.raw.bin
+# (header || payload) is what both the SoC manifest and the FLSH container use.
+"$IMGTOOLS" a35-header \
+	--elf "$CAIRN/bin/cairn.elf" \
+	--in "$STAGE/cairn.payload.bin" \
+	--out "$STAGE/cairn.raw.bin"
 
 echo "==> 3/4 stage prebuilts + generate SoC manifest (cptra_imgtool)"
 for f in caliptra-fw.bin \

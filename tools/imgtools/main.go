@@ -22,6 +22,8 @@ func main() {
 		err = cmdSpiImage(os.Args[2:])
 	case "flsh-image":
 		err = cmdFlshImage(os.Args[2:])
+	case "a35-header":
+		err = cmdA35Header(os.Args[2:])
 	case "validate-layout":
 		err = cmdValidateLayout(os.Args[2:])
 	case "secure-image":
@@ -46,6 +48,7 @@ Commands:
   fmc-image         Generate ASTH header + FMC image (AST2700-A1)
   spi-image         Generate AST2700-A1 SPI flash image (ASTH)
   flsh-image        Generate AST2700-A2 FLSH flash container
+  a35-header        Prepend the CA35 boot header (entry offset) to a raw payload
   validate-layout   Validate DRAM memory layout for TamaGo payloads
   secure-image      Generate signed/encrypted boot image (AST2600/AST10x0)`)
 }
