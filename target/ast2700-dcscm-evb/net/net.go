@@ -152,14 +152,14 @@ func socketFunc(ctx context.Context, network string, family, sotype int, laddr, 
 	var local, remote netip.AddrPort
 
 	if laddr != nil {
-		p, err := netip.ParseAddrPort(laddr.String())
+		p, err := toAddrPort(laddr)
 		if err != nil {
 			return nil, fmt.Errorf("parse local addr: %w", err)
 		}
 		local = p
 	}
 	if raddr != nil {
-		p, err := netip.ParseAddrPort(raddr.String())
+		p, err := toAddrPort(raddr)
 		if err != nil {
 			return nil, fmt.Errorf("parse remote addr: %w", err)
 		}
@@ -167,6 +167,48 @@ func socketFunc(ctx context.Context, network string, family, sotype int, laddr, 
 	}
 
 	return nstack.Socket(ctx, network, syscall.AF_INET, sotype, local, remote)
+}
+
+// toAddrPort converts a net.Addr to a netip.AddrPort. A wildcard listen address
+// like ":22" (no host) has an empty IP, which netip.ParseAddrPort rejects with
+// "no IP"; treat it as 0.0.0.0 so the lneto stack fills in its configured
+// address (see xnet stack-go: unspecified laddr → stack IPv4).
+func toAddrPort(a stdnet.Addr) (netip.AddrPort, error) {
+	if t, ok := a.(*stdnet.TCPAddr); ok {
+		ip := t.IP
+		if len(ip) == 0 {
+			ip = stdnet.IPv4zero
+		}
+		nip, ok := netip.AddrFromSlice(ip)
+		if !ok {
+			return netip.AddrPort{}, fmt.Errorf("invalid IP %v", ip)
+		}
+		return netip.AddrPortFrom(nip.Unmap(), uint16(t.Port)), nil
+	}
+	return netip.ParseAddrPort(a.String())
+}
+
+// LocalAddr returns the stack's current IPv4 address, or the zero Addr before
+// DHCP has assigned one.
+func LocalAddr() netip.Addr {
+	return netip.AddrFrom4(nstack.IPAddr4())
+}
+
+// WaitReady blocks until the stack has a routable IPv4 address (DHCP complete)
+// or ctx is cancelled, returning the address (zero on cancel). Network servers
+// call it before listening so they bind to a real address instead of crash-
+// looping against the unconfigured stack during early boot.
+func WaitReady(ctx context.Context) netip.Addr {
+	for {
+		if a := LocalAddr(); a.IsValid() && !a.IsUnspecified() {
+			return a
+		}
+		select {
+		case <-ctx.Done():
+			return netip.Addr{}
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
 }
 
 // netlinkStub is a no-op netlink for wired Ethernet (always connected).

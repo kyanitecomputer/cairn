@@ -320,7 +320,8 @@ func initSSH() (operator.Service, bool) {
 		return operator.Service{}, false
 	}
 	slog.Info("ssh: management server registered (port 22, Ed25519, password auth)")
-	return operator.PermanentFunc("ssh", func(context.Context) error {
+	return operator.PermanentFunc("ssh", func(ctx context.Context) error {
+		dcscmnet.WaitReady(ctx) // bind only once the stack has an address
 		srv.ListenAndServe(22)
 		return nil // unreachable on hardware; restart if the listener exits
 	}), true
@@ -346,8 +347,14 @@ func initWebUI() []operator.Service {
 		slog.Info("webui: HTTPS server registered (port 443, API only — build with facetui to bundle the SPA)")
 	}
 	return []operator.Service{
-		operator.PermanentFunc("https", srv.HTTPS),
-		operator.PermanentFunc("http-redirect", srv.Redirect),
+		operator.PermanentFunc("https", func(ctx context.Context) error {
+			dcscmnet.WaitReady(ctx) // bind only once the stack has an address
+			return srv.HTTPS(ctx)
+		}),
+		operator.PermanentFunc("http-redirect", func(ctx context.Context) error {
+			dcscmnet.WaitReady(ctx)
+			return srv.Redirect(ctx)
+		}),
 	}
 }
 
