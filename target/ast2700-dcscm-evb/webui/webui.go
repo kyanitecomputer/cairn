@@ -30,9 +30,11 @@ package webui
 import (
 	"context"
 	"crypto/tls"
+	"net/http"
 
 	"src.kyanite.computer/core/cfgstore"
 	corewebui "src.kyanite.computer/core/webui"
+	v1 "src.kyanite.computer/schema/gen/go/schema/v1"
 )
 
 // httpsPort / redirectPort are the well-known management-UI ports.
@@ -54,25 +56,39 @@ type Options struct {
 // either way.
 func Bundled() bool { return assets() != nil }
 
-// Server serves the facet SPA over HTTPS and redirects plain HTTP to it.
+// Server serves the facet SPA + ConnectRPC auth over HTTPS and redirects plain
+// HTTP to it.
 type Server struct {
-	cert tls.Certificate
+	cert    tls.Certificate
+	handler http.Handler
 }
 
 // New builds the UI server, materialising the TLS certificate once (generating
-// and persisting a self-signed one on first boot when none is stored).
+// and persisting a self-signed one on first boot when none is stored) and the
+// combined SPA + /api/connect handler.
 func New(opt Options) (*Server, error) {
 	cert, err := corewebui.Certificate(opt.Store, opt.Hosts)
 	if err != nil {
 		return nil, err
 	}
-	return &Server{cert: cert}, nil
+	auth := corewebui.NewAuthHandler(credentialChecker)
+	return &Server{cert: cert, handler: corewebui.Handler(auth, assets())}, nil
 }
 
-// HTTPS is a supervised service that serves the embedded facet SPA over TLS on
-// :443 until ctx is cancelled.
+// credentialChecker validates web-UI logins. For bring-up it accepts the
+// built-in admin/admin (matching the SSH default); wire it to the config store
+// / the NATS auth-callout authority during auth hardening.
+func credentialChecker(user, pass string) (v1.UserRole, bool) {
+	if user == "admin" && pass == "admin" {
+		return v1.UserRole_USER_ROLE_ADMIN, true
+	}
+	return v1.UserRole_USER_ROLE_UNSPECIFIED, false
+}
+
+// HTTPS is a supervised service that serves the facet SPA + /api/connect over
+// TLS on :443 until ctx is cancelled.
 func (s *Server) HTTPS(ctx context.Context) error {
-	return corewebui.ListenAndServeTLS(ctx, httpsPort, corewebui.SPAHandler(assets()), s.cert)
+	return corewebui.ListenAndServeTLS(ctx, httpsPort, s.handler, s.cert)
 }
 
 // Redirect is a supervised service that permanently redirects plain HTTP on :80
