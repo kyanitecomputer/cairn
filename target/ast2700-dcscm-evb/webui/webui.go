@@ -12,17 +12,18 @@
 //
 // # Build gating
 //
-// The whole web stack (net/http + crypto/tls, ~tens of KB of extra binary) is
-// compiled only under the `facetui` tag, together with the embedded SPA. The
-// default build gets a stub (webui_stub.go) with no core/webui import, so the
-// firmware image stays byte-stable — important because the AST2700 BootMCU
-// jumps the CA35 to a hardcoded entry offset, so growing the payload would
-// require rebuilding the FMC. A `facetui` build intentionally shifts that
-// offset and must be paired with an updated BootMCU A2_CA35_ENTRY_OFF.
+// The web server itself (core/webui, net/http + crypto/tls) is always compiled
+// in — it will also host the Redfish/management API later, not only the SPA.
+// Only the facet asset bundle is gated by the `facetui` tag: with it, the
+// Dagger UI build populates the embedded build/ directory and assets() serves
+// the SPA; without it assets() is nil and the UI routes 404 while the server
+// still runs. The BootMCU now reads the CA35 entry offset from the image header
+// (imgtools a35-header), so growing the payload no longer needs an FMC constant
+// bump.
 //
 // This package is only compiled for GOOS=tamago.
 
-//go:build tamago && facetui
+//go:build tamago
 
 package webui
 

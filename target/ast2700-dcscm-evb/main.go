@@ -332,10 +332,6 @@ func initSSH() (operator.Service, bool) {
 // resource. Returns nil (no services) if the TLS certificate cannot be
 // materialised; the node keeps running without the web UI.
 func initWebUI() []operator.Service {
-	if !webui.Bundled() {
-		slog.Info("webui: facet SPA not bundled (build with -tags facetui) — web UI disabled")
-		return nil
-	}
 	srv, err := webui.New(webui.Options{
 		Store: configStore,
 		Hosts: []string{cfg.Hostname(), cfg.MgmtIP().Addr().String()},
@@ -344,7 +340,11 @@ func initWebUI() []operator.Service {
 		slog.Error("webui: server init failed — web UI disabled", "err", err)
 		return nil
 	}
-	slog.Info("webui: HTTPS server registered (port 443, facet SPA bundled)")
+	if webui.Bundled() {
+		slog.Info("webui: HTTPS server registered (port 443, facet SPA bundled)")
+	} else {
+		slog.Info("webui: HTTPS server registered (port 443, API only — build with facetui to bundle the SPA)")
+	}
 	return []operator.Service{
 		operator.PermanentFunc("https", srv.HTTPS),
 		operator.PermanentFunc("http-redirect", srv.Redirect),
@@ -410,8 +410,12 @@ func printStatus() {
 	}
 	fmt.Println("  [x] Management plane         (in-process NATS + auth callout)")
 	fmt.Println("  [x] SSH console              (port 22; shares BMC command set)")
-	if enabled.WebUI && webui.Bundled() {
-		fmt.Println("  [x] Web UI                   (HTTPS :443 + :80 redirect; facet bundled)")
+	if enabled.WebUI {
+		if webui.Bundled() {
+			fmt.Println("  [x] Web UI                   (HTTPS :443 + :80 redirect; facet bundled)")
+		} else {
+			fmt.Println("  [x] Web UI                   (HTTPS :443 + :80 redirect; API only)")
+		}
 	}
 	fmt.Println("  [x] Heartbeat                (supervised; publishes over bus)")
 	fmt.Println()
