@@ -70,10 +70,29 @@ echo "==> 2/4 build imgtools (host)"
 # Prefix the CA35 payload with the 16-byte boot header carrying the entry
 # offset, so the BootMCU jumps to _rt0 without a hardcoded constant. cairn.raw.bin
 # (header || payload) is what both the SoC manifest and the FLSH container use.
-"$IMGTOOLS" a35-header \
-	--elf "$CAIRN/bin/cairn.elf" \
-	--in "$STAGE/cairn.payload.bin" \
-	--out "$STAGE/cairn.raw.bin"
+#
+# A35_COMPRESS=1 (default) m77rip-compresses the payload; the BootMCU
+# auto-detects the m77 header magic and decompresses XIP->DRAM at boot. Set
+# A35_COMPRESS=0 for the verbatim raw payload (fallback / bring-up).
+A35_COMPRESS="${A35_COMPRESS:-1}"
+if [ "$A35_COMPRESS" = "1" ]; then
+	echo "    compressing CA35 payload with m77rip"
+	M77_COMPRESS="$CAIRN/bin/m77rip-compress"
+	( cd "$CAIRN/tools/m77rip-compress" && cargo build --release -q \
+		&& cp target/release/m77rip-compress "$M77_COMPRESS" )
+	UNCOMP_LEN=$(stat -c%s "$STAGE/cairn.payload.bin")
+	"$M77_COMPRESS" "$STAGE/cairn.payload.bin" "$STAGE/cairn.payload.m77"
+	"$IMGTOOLS" a35-header \
+		--elf "$CAIRN/bin/cairn.elf" \
+		--in "$STAGE/cairn.payload.m77" \
+		--compressed --uncompressed-len "$UNCOMP_LEN" \
+		--out "$STAGE/cairn.raw.bin"
+else
+	"$IMGTOOLS" a35-header \
+		--elf "$CAIRN/bin/cairn.elf" \
+		--in "$STAGE/cairn.payload.bin" \
+		--out "$STAGE/cairn.raw.bin"
+fi
 
 echo "==> 3/4 stage prebuilts + generate SoC manifest (cptra_imgtool)"
 for f in caliptra-fw.bin \

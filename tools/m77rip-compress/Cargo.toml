@@ -1,0 +1,13 @@
+# Empty [workspace] stops Cargo from absorbing this tool into any parent
+# workspace found higher in the tree.
+[workspace]
+
+[package]
+name = "m77rip-compress"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Host CLI wrapping m77rip::compress for the A2 CA35 image pipeline"
+
+[dependencies]
+m77rip = { git = "https://github.com/paddor/m77rip" }

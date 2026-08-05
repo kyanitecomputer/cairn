@@ -22,11 +22,16 @@ import (
 func cmdA35Header(args []string) error {
 	fs := flag.NewFlagSet("a35-header", flag.ExitOnError)
 	elfPath := fs.String("elf", "", "CA35 payload ELF (source of the entry offset)")
-	inPath := fs.String("in", "", "raw payload binary (objcopy -O binary output)")
+	inPath := fs.String("in", "", "payload binary (raw objcopy output, or an m77rip stream with --compressed)")
 	outPath := fs.String("out", "", "output file: header || payload")
+	compressed := fs.Bool("compressed", false, "--in is an m77rip-compressed stream; use the m77 magic")
+	uncompressedLen := fs.Uint("uncompressed-len", 0, "uncompressed payload length (required with --compressed)")
 	fs.Parse(args)
 	if *elfPath == "" || *inPath == "" || *outPath == "" {
-		return fmt.Errorf("usage: imgtools a35-header --elf <elf> --in <raw.bin> --out <out.bin>")
+		return fmt.Errorf("usage: imgtools a35-header --elf <elf> --in <bin> --out <out.bin> [--compressed --uncompressed-len N]")
+	}
+	if *compressed && *uncompressedLen == 0 {
+		return fmt.Errorf("--compressed requires --uncompressed-len")
 	}
 
 	f, err := elf.Open(*elfPath)
@@ -44,13 +49,22 @@ func cmdA35Header(args []string) error {
 	if err != nil {
 		return fmt.Errorf("read --in: %w", err)
 	}
+
+	// payload_len is always the *uncompressed* length: for raw images that is
+	// the payload itself; for m77rip images the BootMCU uses it to validate the
+	// decoded length. The bytes after the header are whatever --in holds.
+	var magic uint32 = a35HeaderMagic
 	payloadLen := uint32(len(payload))
+	if *compressed {
+		magic = a35HeaderM77Magic
+		payloadLen = uint32(*uncompressedLen)
+	}
 
 	hdr := make([]byte, 16)
-	binary.LittleEndian.PutUint32(hdr[0:], a35HeaderMagic)
+	binary.LittleEndian.PutUint32(hdr[0:], magic)
 	binary.LittleEndian.PutUint32(hdr[4:], entryOff)
 	binary.LittleEndian.PutUint32(hdr[8:], payloadLen)
-	binary.LittleEndian.PutUint32(hdr[12:], a35HeaderMagic^entryOff^payloadLen)
+	binary.LittleEndian.PutUint32(hdr[12:], magic^entryOff^payloadLen)
 
 	out := make([]byte, 0, len(hdr)+len(payload))
 	out = append(out, hdr...)
@@ -58,8 +72,12 @@ func cmdA35Header(args []string) error {
 	if err := os.WriteFile(*outPath, out, 0o644); err != nil {
 		return fmt.Errorf("write --out: %w", err)
 	}
-	fmt.Printf("a35-header: entry_off=0x%X payload_len=0x%X -> %s (%d bytes)\n",
-		entryOff, payloadLen, *outPath, len(out))
+	kind := "raw"
+	if *compressed {
+		kind = "m77"
+	}
+	fmt.Printf("a35-header: %s entry_off=0x%X payload_len=0x%X (payload %d B) -> %s (%d bytes)\n",
+		kind, entryOff, payloadLen, len(payload), *outPath, len(out))
 	return nil
 }
 

@@ -24,6 +24,10 @@ const (
 	// is not a trust boundary — the magic is only a sanity/staleness check.
 	a35HeaderOffset = 0x007F0000
 	a35HeaderMagic  = 0xA35EB007
+	// a35HeaderM77Magic marks an m77rip-compressed payload (header || m77 stream);
+	// payload_len then holds the uncompressed length. Mirrors
+	// embassy_aspeed::manifest::RAW_A35_HEADER_M77_MAGIC on the BootMCU read side.
+	a35HeaderM77Magic = 0xA35E4D37
 	// a35TextBase is the link/objcopy base of the A35 (tamago) binary: the
 	// vaddr of the lowest allocatable section (.text), set by `-T 0x404000000`.
 	// The recorded entry offset is e_entry - a35TextBase, i.e. the byte offset
