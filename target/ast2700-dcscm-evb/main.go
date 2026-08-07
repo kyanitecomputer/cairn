@@ -48,6 +48,9 @@ import (
 	"src.kyanite.computer/cairn/pkg/config"
 	"src.kyanite.computer/core/cfgstore"
 
+	// Inter-core IPC to the BootMCU Root-of-Trust over the hardware mailbox.
+	"src.kyanite.computer/cairn/target/ast2700-dcscm-evb/ipc"
+
 	// Platform network bring-up (FTGMAC + lneto → net.SocketFunc).
 	dcscmnet "src.kyanite.computer/cairn/target/ast2700-dcscm-evb/net"
 
@@ -184,6 +187,12 @@ func main() {
 
 	printStatus()
 	slog.Info("all services started")
+
+	// Probe the BootMCU Root-of-Trust over the hardware mailbox (IPC1) with the
+	// shared protobuf schema — the first inter-core IPC round-trip. Run in the
+	// background so the console/SSH still come up if the IPC1 window is not
+	// mapped for the CA35 (in which case this would fault); bounded + non-fatal.
+	go ipc.Probe()
 
 	// Assemble and run the microkernel. The context is never cancelled on
 	// hardware, so Run blocks forever.
