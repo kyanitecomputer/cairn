@@ -25,13 +25,9 @@ func cmdA35Header(args []string) error {
 	inPath := fs.String("in", "", "payload binary (raw objcopy output, or an m77rip stream with --compressed)")
 	outPath := fs.String("out", "", "output file: header || payload")
 	compressed := fs.Bool("compressed", false, "--in is an m77rip-compressed stream; use the m77 magic")
-	uncompressedLen := fs.Uint("uncompressed-len", 0, "uncompressed payload length (required with --compressed)")
 	fs.Parse(args)
 	if *elfPath == "" || *inPath == "" || *outPath == "" {
-		return fmt.Errorf("usage: imgtools a35-header --elf <elf> --in <bin> --out <out.bin> [--compressed --uncompressed-len N]")
-	}
-	if *compressed && *uncompressedLen == 0 {
-		return fmt.Errorf("--compressed requires --uncompressed-len")
+		return fmt.Errorf("usage: imgtools a35-header --elf <elf> --in <bin> --out <out.bin> [--compressed]")
 	}
 
 	f, err := elf.Open(*elfPath)
@@ -50,14 +46,14 @@ func cmdA35Header(args []string) error {
 		return fmt.Errorf("read --in: %w", err)
 	}
 
-	// payload_len is always the *uncompressed* length: for raw images that is
-	// the payload itself; for m77rip images the BootMCU uses it to validate the
-	// decoded length. The bytes after the header are whatever --in holds.
+	// payload_len is the length of the bytes that follow the header: for raw
+	// images the verbatim payload, for m77rip images the *exact* compressed
+	// stream length (the BootMCU feeds precisely this many bytes to the strict
+	// decoder — the FLSH container may pad the image past the stream end).
 	var magic uint32 = a35HeaderMagic
 	payloadLen := uint32(len(payload))
 	if *compressed {
 		magic = a35HeaderM77Magic
-		payloadLen = uint32(*uncompressedLen)
 	}
 
 	hdr := make([]byte, 16)

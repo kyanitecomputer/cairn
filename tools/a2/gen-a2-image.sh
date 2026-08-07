@@ -80,12 +80,11 @@ if [ "$A35_COMPRESS" = "1" ]; then
 	M77_COMPRESS="$CAIRN/bin/m77rip-compress"
 	( cd "$CAIRN/tools/m77rip-compress" && cargo build --release -q \
 		&& cp target/release/m77rip-compress "$M77_COMPRESS" )
-	UNCOMP_LEN=$(stat -c%s "$STAGE/cairn.payload.bin")
 	"$M77_COMPRESS" "$STAGE/cairn.payload.bin" "$STAGE/cairn.payload.m77"
 	"$IMGTOOLS" a35-header \
 		--elf "$CAIRN/bin/cairn.elf" \
 		--in "$STAGE/cairn.payload.m77" \
-		--compressed --uncompressed-len "$UNCOMP_LEN" \
+		--compressed \
 		--out "$STAGE/cairn.raw.bin"
 else
 	"$IMGTOOLS" a35-header \
