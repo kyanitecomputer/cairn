@@ -71,10 +71,13 @@ echo "==> 2/4 build imgtools (host)"
 # offset, so the BootMCU jumps to _rt0 without a hardcoded constant. cairn.raw.bin
 # (header || payload) is what both the SoC manifest and the FLSH container use.
 #
-# A35_COMPRESS=1 (default) m77rip-compresses the payload; the BootMCU
-# auto-detects the m77 header magic and decompresses XIP->DRAM at boot. Set
-# A35_COMPRESS=0 for the verbatim raw payload (fallback / bring-up).
-A35_COMPRESS="${A35_COMPRESS:-1}"
+# A35_COMPRESS=0 (default) stores the CA35 payload verbatim — the reliable path.
+# A35_COMPRESS=1 m77rip-compresses it (BootMCU auto-detects the m77 header magic
+# and decompresses XIP->DRAM at boot). Compression currently trips the
+# BootROM/Caliptra secure-boot manifest stage (the flashed compressed bytes
+# don't match the runtime image Caliptra wants to authorize), so it is opt-in
+# pending the Caliptra manifest work (see docs/bootmcu-runtime-plan.md WS5).
+A35_COMPRESS="${A35_COMPRESS:-0}"
 if [ "$A35_COMPRESS" = "1" ]; then
 	echo "    compressing CA35 payload with m77rip"
 	M77_COMPRESS="$CAIRN/bin/m77rip-compress"
