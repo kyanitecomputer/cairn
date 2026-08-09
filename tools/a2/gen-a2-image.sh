@@ -33,6 +33,22 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 CAIRN="$(cd "$HERE/../.." && pwd)"
 
+# DIAG=1 builds the read-only FMC/SPI-NOR hardware diagnostic payload
+# (`flashdiag` tag) instead of the normal management-plane payload, and writes
+# the image to cairn_ast2700_a2_flashdiag.bin. DIAGDMA=1 additionally enables
+# the opt-in DMA-scaling probe (`flashdiagdma`). Everything else in the A2
+# pipeline (BootMCU, prebuilts, SoC manifest regeneration, FLSH stitch) is
+# identical, so the diagnostic boots exactly like the real payload.
+DIAG="${DIAG:-0}"
+DIAGDMA="${DIAGDMA:-0}"
+if [ "$DIAG" = "1" ]; then
+	IMAGE_NAME="cairn_ast2700_a2_flashdiag.bin"
+	PAYLOAD_ELF="$CAIRN/bin/cairn-flashdiag.elf"
+else
+	IMAGE_NAME="cairn_ast2700_a2.bin"
+	PAYLOAD_ELF="$CAIRN/bin/cairn.elf"
+fi
+
 TAMAGO="${TAMAGO:-/home/mdr164/private/tamago/tamago-go/bin/go}"
 CPTRA_IMGTOOL="${CPTRA_IMGTOOL:-$CAIRN/../cptra_imgtool}"
 PREBUILT="${PREBUILT:?set PREBUILT to a dir with caliptra-fw/mcu-runtime/prebuilts}"
@@ -45,7 +61,11 @@ STAGE="$OUT/a2-stage"
 KEYDIR="$STAGE/keys"
 
 IMGTOOLS="$CAIRN/bin/imgtools"
-MANIFEST_TOOL="$CPTRA_IMGTOOL/target/release/caliptra-auth-manifest-app-2x"
+# The SoC-manifest generator is the `create-auth-man-2x` subcommand of the
+# cptra-imgtool binary. Prefer the prebuilt release binary so we don't trigger a
+# rustup toolchain re-sync (the pinned channel + llvm-tools components can fail
+# to install in some environments); fall back to `cargo run` if it's absent.
+MANIFEST_TOOL="$CPTRA_IMGTOOL/target/release/cptra-imgtool"
 
 mkdir -p "$OUT" "$STAGE"
 
@@ -53,7 +73,7 @@ mkdir -p "$OUT" "$STAGE"
 # step (e.g. a missing prebuilt) aborts before the stitch step, and without this
 # the old image would remain in place looking freshly built — a flash programmer
 # then re-flashes stale firmware. Deleting it makes such failures unmistakable.
-rm -f "$OUT/cairn_ast2700_a2.bin"
+rm -f "$OUT/$IMAGE_NAME"
 
 echo "==> 1/4 build cairn CA35 payload"
 # Forward VIDEO=1 (framebuffer console) and FACETUI=1 (embed the facet SPA).
@@ -61,8 +81,17 @@ CAIRN_TAGS=""
 if [ -n "${FACETUI:-}" ]; then
 	CAIRN_TAGS="facetui"
 fi
-( cd "$CAIRN" && TAMAGO="$TAMAGO" VIDEO="${VIDEO:-}" TAGS_EXTRA="$CAIRN_TAGS" make build )
-llvm-objcopy -O binary "$CAIRN/bin/cairn.elf" "$STAGE/cairn.payload.bin"
+if [ "$DIAG" = "1" ]; then
+	DIAG_TARGET="flashdiag"
+	if [ "$DIAGDMA" = "1" ]; then
+		DIAG_TARGET="flashdiag-dma"
+	fi
+	echo "    DIAG build: make $DIAG_TARGET (read-only FMC/SPI-NOR probe payload)"
+	( cd "$CAIRN" && TAMAGO="$TAMAGO" TAGS_EXTRA="$CAIRN_TAGS" make "$DIAG_TARGET" )
+else
+	( cd "$CAIRN" && TAMAGO="$TAMAGO" VIDEO="${VIDEO:-}" TAGS_EXTRA="$CAIRN_TAGS" make build )
+fi
+llvm-objcopy -O binary "$PAYLOAD_ELF" "$STAGE/cairn.payload.bin"
 
 echo "==> 2/4 build imgtools (host)"
 ( cd "$CAIRN/tools/imgtools" && GOWORK=off "$TAMAGO" build -o "$IMGTOOLS" . )
@@ -85,13 +114,13 @@ if [ "$A35_COMPRESS" = "1" ]; then
 		&& cp target/release/m77rip-compress "$M77_COMPRESS" )
 	"$M77_COMPRESS" "$STAGE/cairn.payload.bin" "$STAGE/cairn.payload.m77"
 	"$IMGTOOLS" a35-header \
-		--elf "$CAIRN/bin/cairn.elf" \
+		--elf "$PAYLOAD_ELF" \
 		--in "$STAGE/cairn.payload.m77" \
 		--compressed \
 		--out "$STAGE/cairn.raw.bin"
 else
 	"$IMGTOOLS" a35-header \
-		--elf "$CAIRN/bin/cairn.elf" \
+		--elf "$PAYLOAD_ELF" \
 		--in "$STAGE/cairn.payload.bin" \
 		--out "$STAGE/cairn.raw.bin"
 fi
@@ -112,9 +141,7 @@ cp "$MCU_RUNTIME_BIN" "$STAGE/ast2700-mcu-runtime.bin"
 echo "    MCU runtime: $MCU_RUNTIME_BIN"
 
 if [ ! -x "$MANIFEST_TOOL" ]; then
-	echo "ERROR: manifest tool not built: $MANIFEST_TOOL" >&2
-	echo "Build it: (cd $CPTRA_IMGTOOL && cargo build --release -p caliptra-auth-manifest-app-2x)" >&2
-	exit 1
+	echo "    manifest binary not prebuilt; will use 'cargo run' (may sync rustup)"
 fi
 
 # Assemble a combined key dir: ECC+LMS dev keys + MLDSA dev keys (see config).
@@ -127,12 +154,21 @@ for k in vnd-fw-mldsa-pub-key-0 vnd-fw-mldsa-priv-key-0 \
 	cp "$MLDSA_KEYSRC/$k.bin" "$KEYDIR/"
 done
 
-( cd "$CPTRA_IMGTOOL" && cargo run --release -- create-auth-man-2x \
-	--cfg "$HERE/cairn-a2-manifest.toml" \
-	--key-dir "$KEYDIR" \
-	--prebuilt-dir "$STAGE" \
-	--pqc-key-type 3 \
-	--man "$STAGE/cairn-soc-manifest.bin" )
+if [ -x "$MANIFEST_TOOL" ]; then
+	"$MANIFEST_TOOL" create-auth-man-2x \
+		--cfg "$HERE/cairn-a2-manifest.toml" \
+		--key-dir "$KEYDIR" \
+		--prebuilt-dir "$STAGE" \
+		--pqc-key-type 3 \
+		--man "$STAGE/cairn-soc-manifest.bin"
+else
+	( cd "$CPTRA_IMGTOOL" && cargo run --release -- create-auth-man-2x \
+		--cfg "$HERE/cairn-a2-manifest.toml" \
+		--key-dir "$KEYDIR" \
+		--prebuilt-dir "$STAGE" \
+		--pqc-key-type 3 \
+		--man "$STAGE/cairn-soc-manifest.bin" )
+fi
 
 echo "==> 4/4 stitch FLSH container (imgtools)"
 "$IMGTOOLS" flsh-image \
@@ -147,6 +183,6 @@ echo "==> 4/4 stitch FLSH container (imgtools)"
 	--soc-image "$STAGE/ddr5_pmu_train_dmem.bin" \
 	--soc-image "$STAGE/dp_fw.bin" \
 	--soc-image "$STAGE/cairn.raw.bin" \
-	--output "$OUT/cairn_ast2700_a2.bin"
+	--output "$OUT/$IMAGE_NAME"
 
-echo "Done: $OUT/cairn_ast2700_a2.bin"
+echo "Done: $OUT/$IMAGE_NAME"
