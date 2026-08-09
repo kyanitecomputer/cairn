@@ -52,8 +52,11 @@ const (
 	rCECtrl      = 0x004
 	rIRQCtrl     = 0x008
 	rCmdCtrl     = 0x00C
+	rCE1Ctrl     = 0x014
 	rCE0Ctrl     = 0x010 // CE_CTRL_N[0..3] at 0x010,0x014,0x018,0x01C
 	rCE0Range    = 0x030 // CE_ADDR_RANGE[0..3] at 0x030,0x034,0x038,0x03C
+	rMisc        = 0x054 // MISC_CTRL / SAFS mode-select (SPI054; must be 0 for user PIO)
+	rDataFIFO    = 0x200 // AST2700 user-mode data FIFO (ctrl_base + 0x200 + fifo_offset)
 	rEngineStat  = 0x1E0
 	rLockSRST    = 0x1F0
 	rLockKeep    = 0x1F4 // LOCK_SOC_RESET: keeps value across SOC reset
@@ -68,6 +71,7 @@ const (
 	cmdModeUser = 0x3 // user command mode
 	ceStop      = 1 << 2
 	ioModeMask  = 0xf << 28
+	clockBits   = 0x0f000f00 // CLOCK_RATE_LOW [11:8] | CLOCK_RATE_HIGH [27:24]
 )
 
 // SPI NOR opcodes used read-only.
@@ -123,6 +127,7 @@ func dumpRegisters() {
 	for cs := 0; cs < 4; cs++ {
 		p("  CE%d_RANGE    (%#05x) = %#010x", cs, rCE0Range+uintptr(cs*4), r32(rCE0Range+uintptr(cs*4)))
 	}
+	p("  MISC_CTRL    (0x054) = %#010x  (SAFS mode-select; must be 0 for user PIO)", r32(rMisc))
 	p("  ENGINE_STAT  (0x1E0) = %#010x", r32(rEngineStat))
 	p("  LOCK_SRST    (0x1F0) = %#010x", r32(rLockSRST))
 	p("  LOCK_KEEP    (0x1F4) = %#010x", r32(rLockKeep))
@@ -219,124 +224,127 @@ func windowProbe() []byte {
 	return wordView
 }
 
-// rdidProbe answers Q0.1 (JEDEC ID) and Q0.4a (double-clock). It issues RDID in
-// user mode two ways: the Go driver's read-only receive loop, and the Rust
-// driver's write-0xFF-then-read loop. Whichever yields a plausible JEDEC ID is
-// the correct receive discipline for this controller.
-func rdidProbe() {
-	p("[Q0.1/Q0.4a] RDID (0x9F) in user mode, two receive disciplines:")
-
-	saved := r32(rCE0Ctrl)
-	// User mode, single-bit I/O, preserve clock bits.
-	cu := (saved &^ (ioModeMask | cmdModeMask)) | cmdModeUser
-
-	readOnly := func() [3]byte {
-		beginCE0(cu)
-		reg.Write8(fmcWin, opRDID)
-		var id [3]byte
-		for i := range id {
-			id[i] = reg.Read8(fmcWin)
-		}
-		endCE0(cu)
-		return id
-	}
-	dummyWrite := func() [3]byte {
-		beginCE0(cu)
-		reg.Write8(fmcWin, opRDID)
-		var id [3]byte
-		for i := range id {
-			reg.Write8(fmcWin, 0xFF)
-			id[i] = reg.Read8(fmcWin)
-		}
-		endCE0(cu)
-		return id
-	}
-
-	go1 := readOnly()
-	go2 := readOnly() // repeat: stability check
-	ru := dummyWrite()
-	w32(rCE0Ctrl, saved) // restore entry state
-
-	p("  read-only loop (Go style)   : %02x %02x %02x   (repeat: %02x %02x %02x)",
-		go1[0], go1[1], go1[2], go2[0], go2[1], go2[2])
-	p("  0xFF-write loop (Rust style): %02x %02x %02x", ru[0], ru[1], ru[2])
-	p("  plausible JEDEC? read-only=%v  0xFF-write=%v", plausibleID(go1), plausibleID(ru))
-	p("  (a plausible ID has a non-00/non-FF manufacturer byte and stable repeats)")
+// userStrategy describes one candidate AST2700 user-mode command mechanism.
+// The first hardware run returned zeros for every user-mode transaction, so we
+// no longer assume a single mechanism: we try several and print each, so one
+// boot reveals which the silicon actually honours. The variables under test
+// are those the vendor (Zephyr) user-mode path touches that the first probe did
+// not: clearing MISC_CTRL/SAFS (spi_aspeed.c:382), a CE_CTRL read-back flush
+// (:388), routing data through the 0x200 FIFO (:376), and a real clock divider.
+type userStrategy struct {
+	name      string
+	useFIFO   bool // route data through ctrl_base+0x200+fifo_offset instead of the window
+	clearMisc bool // write 0 to MISC_CTRL (0x054) to disable SAFS
+	setClock  bool // force a non-zero clock divider (mirror CE1's) instead of CE0's
 }
 
-// addrModeProbe answers Q0.3 empirically: it reads offset 0 in user mode with a
-// 3-byte and a 4-byte address and compares each against the auto-read window
-// reference. The variant that matches reveals the flash device's effective
-// addressing at CA35 entry.
+func userStrategies() []userStrategy {
+	return []userStrategy{
+		{"A window, as-is (baseline)", false, false, false},
+		{"B window, clear MISC + flush", false, true, false},
+		{"C window, clear MISC + flush + clk", false, true, true},
+		{"D FIFO@0x200, clear MISC + flush", true, true, false},
+	}
+}
+
+// fifoPort returns the AST2700 user-mode data FIFO address for CE0:
+// ctrl_base + 0x200 + (CE0 window start / 16 MiB).
+func fifoPort() uintptr {
+	start, _, _ := spi.SegmentDecode(spi.AST2700, r32(rCE0Range))
+	return fmcBase + rDataFIFO + uintptr(start/0x0100_0000)
+}
+
+// userXfer runs one user-mode transaction under the given strategy: send opcode
+// + addrLen address bytes (MSB-first), then read n bytes. dummyWrite selects
+// the Rust "write 0xFF then read" receive discipline instead of a plain read.
+// It saves and restores CE0_CTRL and MISC_CTRL.
+func userXfer(s userStrategy, op byte, addr uint32, addrLen, n int, dummyWrite bool) []byte {
+	savedCE := r32(rCE0Ctrl)
+	savedMisc := r32(rMisc)
+	if s.clearMisc {
+		w32(rMisc, 0)
+	}
+	cu := (savedCE &^ (ioModeMask | cmdModeMask)) | cmdModeUser
+	if s.setClock {
+		cu = (cu &^ clockBits) | (r32(rCE1Ctrl) & clockBits)
+	}
+	port := fmcWin
+	if s.useFIFO {
+		port = fifoPort()
+	}
+
+	w32(rCE0Ctrl, cu|ceStop)
+	w32(rCE0Ctrl, cu&^ceStop)
+	_ = r32(rCE0Ctrl) // read-back flush (vendor does this)
+
+	reg.Write8(port, op)
+	for i := 0; i < addrLen; i++ {
+		reg.Write8(port, byte(addr>>uint(8*(addrLen-1-i))))
+	}
+	out := make([]byte, n)
+	for i := range out {
+		if dummyWrite {
+			reg.Write8(port, 0xFF)
+		}
+		out[i] = reg.Read8(port)
+	}
+
+	w32(rCE0Ctrl, cu|ceStop)
+	w32(rCE0Ctrl, savedCE)
+	w32(rMisc, savedMisc)
+	return out
+}
+
+// rdidProbe answers Q0.1 (JEDEC ID) and Q0.4a (receive discipline) across all
+// candidate user-mode strategies, since the first run showed the naive window
+// approach returns zeros. For each strategy it prints RDID via both the
+// read-only loop and the 0xFF-write loop.
+func rdidProbe() {
+	p("[Q0.1/Q0.4a] RDID (0x9F) across user-mode strategies (FIFO port=%#x):", uint64(fifoPort()))
+	for _, s := range userStrategies() {
+		ro := userXfer(s, opRDID, 0, 0, 3, false)
+		dw := userXfer(s, opRDID, 0, 0, 3, true)
+		p("  %-34s read-only=%s  0xFF-write=%s  plausible(ro=%v dw=%v)",
+			s.name, hex(ro), hex(dw), plausible3(ro), plausible3(dw))
+	}
+	p("  (plausible = non-00/non-FF first byte; that strategy+discipline is the one to use)")
+}
+
+// addrModeProbe answers Q0.3 empirically: for the two most likely strategies it
+// reads offset 0 with a 3-byte and a 4-byte address and compares against the
+// auto-read window reference. The matching variant reveals the device's
+// effective addressing at entry.
 func addrModeProbe(ref []byte, entryMode uint32) {
 	const n = 16
 	p("[Q0.3b] device addressing at entry — user-mode read of offset 0:")
 	if entryMode != cmdModeAuto {
-		p("  note: CE0 was NOT in auto-read at entry (CMD_MODE=%d); the window", entryMode)
-		p("        reference may not reflect flash contents. Compare raw bytes below.")
+		p("  note: CE0 was NOT in auto-read at entry (CMD_MODE=%d); window ref", entryMode)
+		p("        may not reflect flash contents. Compare raw bytes below.")
 	}
-
-	saved := r32(rCE0Ctrl)
-	cu := (saved &^ (ioModeMask | cmdModeMask)) | cmdModeUser
-
-	read3 := userRead(cu, opRead3B, 0, n, false)
-	read4 := userRead(cu, opRead4B, 0, n, true)
-	w32(rCE0Ctrl, saved)
-
 	refN := ref
 	if len(refN) > n {
 		refN = refN[:n]
 	}
 	p("  auto-read window ref : %s", hex(refN))
-	p("  3-byte cmd 0x03      : %s  (match=%v)", hex(read3), eq(read3, refN))
-	p("  4-byte cmd 0x13      : %s  (match=%v)", hex(read4), eq(read4, refN))
-	switch {
-	case eq(read3, refN) && !eq(read4, refN):
-		p("  => VERDICT: device is in 3-BYTE mode at entry")
-	case eq(read4, refN) && !eq(read3, refN):
-		p("  => VERDICT: device is in 4-BYTE mode at entry (Policy A handoff needed)")
-	default:
-		p("  => VERDICT: inconclusive — inspect the raw bytes above")
+	for _, s := range userStrategies() {
+		if !s.clearMisc {
+			continue // baseline already known to fail; skip the noise
+		}
+		read3 := userXfer(s, opRead3B, 0, 3, n, false)
+		read4 := userXfer(s, opRead4B, 0, 4, n, false)
+		p("  [%s]", s.name)
+		p("    3B 0x03: %s (match=%v)", hex(read3), eq(read3, refN))
+		p("    4B 0x13: %s (match=%v)", hex(read4), eq(read4, refN))
 	}
+	p("  => device is in 3B if 0x03 matches the window ref, 4B if 0x13 matches")
 }
 
-// beginCE0 starts a user-mode transaction on CE0: assert then deassert CE_STOP
-// to pull CE# active. Mirrors hal/spi TxRx activate.
-func beginCE0(ctrlUser uint32) {
-	w32(rCE0Ctrl, ctrlUser|ceStop)
-	w32(rCE0Ctrl, ctrlUser&^ceStop)
-}
-
-// endCE0 ends a user-mode transaction: reassert CE_STOP to release CE#.
-func endCE0(ctrlUser uint32) {
-	w32(rCE0Ctrl, ctrlUser|ceStop)
-}
-
-// userRead performs one user-mode read: opcode, address (3 or 4 bytes,
-// MSB-first), then n data bytes via the read-only receive loop.
-func userRead(ctrlUser uint32, op byte, addr uint32, n int, fourByte bool) []byte {
-	beginCE0(ctrlUser)
-	reg.Write8(fmcWin, op)
-	if fourByte {
-		reg.Write8(fmcWin, byte(addr>>24))
-	}
-	reg.Write8(fmcWin, byte(addr>>16))
-	reg.Write8(fmcWin, byte(addr>>8))
-	reg.Write8(fmcWin, byte(addr))
-	out := make([]byte, n)
-	for i := range out {
-		out[i] = reg.Read8(fmcWin)
-	}
-	endCE0(ctrlUser)
-	return out
-}
-
-func plausibleID(id [3]byte) bool {
-	mfr := id[0]
-	if mfr == 0x00 || mfr == 0xFF {
+func plausible3(id []byte) bool {
+	if len(id) == 0 {
 		return false
 	}
-	return true
+	mfr := id[0]
+	return mfr != 0x00 && mfr != 0xFF
 }
 
 func eq(a, b []byte) bool {

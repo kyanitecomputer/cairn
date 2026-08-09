@@ -41,12 +41,11 @@ func dmaProbe() {
 	const n = 16
 	p("[Q0.4b] DMA-scaling probe at flash offset %#x (%d bytes):", off, n)
 
-	// Reference: user-mode reads of the same offset, both addressings.
-	saved := r32(rCE0Ctrl)
-	cu := (saved &^ (ioModeMask | cmdModeMask)) | cmdModeUser
-	ref3 := userRead(cu, opRead3B, off, n, false)
-	ref4 := userRead(cu, opRead4B, off, n, true)
-	w32(rCE0Ctrl, saved)
+	// Reference: user-mode reads of the same offset, both addressings, using
+	// the MISC-clear+flush strategy (B).
+	refStrat := userStrategy{name: "B", clearMisc: true}
+	ref3 := userXfer(refStrat, opRead3B, off, 3, n, false)
+	ref4 := userXfer(refStrat, opRead4B, off, 4, n, false)
 	p("  user-mode ref 3B: %s", hex(ref3))
 	p("  user-mode ref 4B: %s", hex(ref4))
 
