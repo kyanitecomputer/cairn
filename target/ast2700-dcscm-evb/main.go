@@ -139,6 +139,11 @@ var ast2700Defaults = config.Defaults{
 func main() {
 	startTime = time.Now()
 
+	// Hardware flash diagnostic short-circuit. With the `flashdiag` build tag
+	// this runs the read-only FMC/SPI-NOR probe suite and never returns; normal
+	// boot is skipped. Without the tag it is a no-op (see diaghook_*.go).
+	maybeRunFlashDiag()
+
 	// Telemetry first, so all subsequent log calls are captured.
 	telemetry.Init("cairn")
 

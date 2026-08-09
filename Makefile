@@ -80,7 +80,7 @@ ELF     = $(BIN_DIR)/cairn.elf
 # ---------------------------------------------------------------------------
 # Targets
 # ---------------------------------------------------------------------------
-.PHONY: all clean build test imgtools help
+.PHONY: all clean build flashdiag flashdiag-dma test imgtools help
 
 all: build
 
@@ -99,6 +99,32 @@ build: $(BIN_DIR)
 		./$(TARGET)
 	@echo "Built: $(ELF)"
 	@$(READELF) -h $(ELF) | grep -i "entry point"
+
+# Read-only FMC/SPI-NOR hardware diagnostic payload. Same link layout as the
+# normal payload, but the `flashdiag` tag makes it run the probe suite and idle
+# instead of booting. Stitch it into a flashable image exactly like the normal
+# payload, e.g.:
+#
+#   dagger call image --build-tags "linkcpuinit,ast2700dcscm,flashdiag" \
+#       --silicon a1 ... export --path .
+#
+# Add `flashdiagdma` to the tag list to also run the (opt-in) DMA-scaling probe.
+FLASHDIAG_ELF  = $(BIN_DIR)/cairn-flashdiag.elf
+FLASHDIAG_TAGS = $(BOARD_TAG),linkcpuinit,flashdiag$(if $(TAGS_EXTRA),$(comma)$(TAGS_EXTRA))
+comma := ,
+flashdiag: $(BIN_DIR)
+	@echo "Building Cairn flash-diagnostic ELF (tags: $(FLASHDIAG_TAGS))..."
+	$(GOENV) $(TAMAGO) build \
+		-trimpath \
+		-tags $(FLASHDIAG_TAGS) \
+		-ldflags "-T $(RUNTIME_TEXT) -R $(ALIGN)" \
+		-o $(FLASHDIAG_ELF) \
+		./$(TARGET)
+	@echo "Built: $(FLASHDIAG_ELF)"
+	@$(READELF) -h $(FLASHDIAG_ELF) | grep -i "entry point"
+
+flashdiag-dma: TAGS_EXTRA := flashdiagdma
+flashdiag-dma: flashdiag
 
 # Host unit tests (Linux userspace).
 test:
