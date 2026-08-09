@@ -57,7 +57,9 @@ const (
 	rCE0Range    = 0x030 // CE_ADDR_RANGE[0..3] at 0x030,0x034,0x038,0x03C
 	rMisc        = 0x054 // MISC_CTRL / SAFS mode-select (SPI054; must be 0 for user PIO)
 	rDataFIFO    = 0x200 // AST2700 user-mode data FIFO (ctrl_base + 0x200 + fifo_offset)
+	rDmaFifoLen  = 0x1C0
 	rEngineStat  = 0x1E0
+	rDataInMon   = 0x1E4 // last data shifted in (RO) — detects whether the engine clocked
 	rLockSRST    = 0x1F0
 	rLockKeep    = 0x1F4 // LOCK_SOC_RESET: keeps value across SOC reset
 	rLockSOC     = 0x1F8
@@ -66,12 +68,14 @@ const (
 
 // CE_CTRL_N (per-CE control) bit fields.
 const (
-	cmdModeMask = 0x3
-	cmdModeAuto = 0x0 // auto-read (memory-mapped XIP)
-	cmdModeUser = 0x3 // user command mode
-	ceStop      = 1 << 2
-	ioModeMask  = 0xf << 28
-	clockBits   = 0x0f000f00 // CLOCK_RATE_LOW [11:8] | CLOCK_RATE_HIGH [27:24]
+	cmdModeMask       = 0x3
+	cmdModeAuto       = 0x0 // auto-read (memory-mapped XIP)
+	cmdModeNormalRead = 0x1 // controller-generated read using CE_CTRL.COMMAND
+	cmdModeUser       = 0x3 // user command mode
+	cmdShift          = 16  // CE_CTRL.COMMAND field [23:16]
+	ceStop            = 1 << 2
+	ioModeMask        = 0xf << 28
+	clockBits         = 0x0f000f00 // CLOCK_RATE_LOW [11:8] | CLOCK_RATE_HIGH [27:24]
 )
 
 // SPI NOR opcodes used read-only.
@@ -102,7 +106,8 @@ func Run() {
 	ref := windowProbe()          // Q0.2 + reference content for Q0.3
 	rdidProbe()                   // Q0.1 + Q0.4a
 	addrModeProbe(ref, entryMode) // Q0.3
-	dmaProbe()                    // Q0.4b (opt-in; stub unless flashdiagdma)
+	commandPathProbe(ref)         // can the CA35 command the FMC at all?
+	dmaProbe()                    // Q0.4b (controller DMA path; stub unless flashdiagdma)
 
 	p("-----------------------------------------------------------------------")
 	p("DIAG COMPLETE — see findings above. Idling.")
@@ -337,6 +342,70 @@ func addrModeProbe(ref []byte, entryMode uint32) {
 		p("    4B 0x13: %s (match=%v)", hex(read4), eq(read4, refN))
 	}
 	p("  => device is in 3B if 0x03 matches the window ref, 4B if 0x13 matches")
+}
+
+// commandPathProbe determines whether the CA35 can make the FMC engine clock a
+// transaction at all — the crux question after every user-mode PIO returned
+// zeros. Two independent, non-destructive signals:
+//
+//  1. Normal-read command mode (CMD_MODE=1): the controller generates the read
+//     using CE_CTRL.COMMAND + auto-generated address (per CE_CTRL/0x004 ADDR_4B,
+//     currently 4B). The CA35 only *reads* the window (known to work). If this
+//     matches the auto-read reference, the controller command engine is
+//     drivable from the CA35 and only raw user-mode window PIO is the problem.
+//  2. Engine-shift observation: issue a user-mode opcode write (0x9F) and read
+//     ENGINE_STATUS / DATA_IN_MONITOR / DMA_FIFO_LEN before and after. If they
+//     change, the CA35's window writes DO clock the bus (so the read-back is
+//     the issue); if nothing moves, CA35 user-mode window writes are dropped
+//     (flash writes must be delegated to the BootMCU/RoT).
+func commandPathProbe(ref []byte) {
+	const n = 16
+	p("[cmd-path] can the CA35 drive the FMC engine?")
+
+	refN := ref
+	if len(refN) > n {
+		refN = refN[:n]
+	}
+
+	// (1) normal-read mode with COMMAND=0x13 (matches the 4B auto-read the
+	// controller is already configured for).
+	saved := r32(rCE0Ctrl)
+	savedMisc := r32(rMisc)
+	w32(rMisc, 0)
+	nr := (saved &^ (ioModeMask | cmdModeMask | (0xff << cmdShift))) |
+		cmdModeNormalRead | (uint32(opRead4B) << cmdShift)
+	w32(rCE0Ctrl, nr)
+	_ = r32(rCE0Ctrl)
+	got := make([]byte, n)
+	for i := 0; i < n; i++ {
+		got[i] = reg.Read8(fmcWin + uintptr(i))
+	}
+	w32(rCE0Ctrl, saved)
+	w32(rMisc, savedMisc)
+	p("  normal-read (CMD_MODE=1, COMMAND=0x13): %s (match=%v)", hex(got), eq(got, refN))
+
+	// (2) engine-shift observation around a user-mode opcode write.
+	es0, dim0, fl0 := r32(rEngineStat), r32(rDataInMon), r32(rDmaFifoLen)
+	sMisc := r32(rMisc)
+	w32(rMisc, 0)
+	cu := (saved &^ (ioModeMask | cmdModeMask)) | cmdModeUser
+	w32(rCE0Ctrl, cu|ceStop)
+	w32(rCE0Ctrl, cu&^ceStop)
+	_ = r32(rCE0Ctrl)
+	reg.Write8(fmcWin, opRDID)
+	reg.Write8(fmcWin, 0xFF)
+	es1, dim1, fl1 := r32(rEngineStat), r32(rDataInMon), r32(rDmaFifoLen)
+	w32(rCE0Ctrl, cu|ceStop)
+	w32(rCE0Ctrl, saved)
+	w32(rMisc, sMisc)
+	p("  engine before: STAT=%#010x DATA_IN=%#010x FIFO_LEN=%#010x", es0, dim0, fl0)
+	p("  engine after : STAT=%#010x DATA_IN=%#010x FIFO_LEN=%#010x", es1, dim1, fl1)
+	if es0 != es1 || dim0 != dim1 || fl0 != fl1 {
+		p("  => engine state CHANGED: CA35 user-mode writes DO clock the bus (read-back is the issue)")
+	} else {
+		p("  => engine state UNCHANGED: CA35 user-mode window writes appear dropped")
+		p("     (flash writes likely must be delegated to the BootMCU/RoT over IPC)")
+	}
 }
 
 func plausible3(id []byte) bool {
