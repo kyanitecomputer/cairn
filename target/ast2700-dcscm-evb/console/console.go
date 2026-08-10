@@ -21,6 +21,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/kyanitecomputer/aspeed-go/hal/usb/vhub"
 	tboard "github.com/usbarmory/tamago/board/aspeed/ast2700dcscm"
 	"src.kyanite.computer/core/cfgstore"
 	"src.kyanite.computer/core/console"
@@ -59,6 +60,7 @@ func NewShell(opt Options) *console.Shell {
 		lsCmd(opt),
 		mdCmd(),
 		mwCmd(),
+		usbCmd(),
 	}
 	cmds = append(cmds, opt.Extra...)
 	return console.New(console.Config{
@@ -260,6 +262,99 @@ func mwCmd() console.Command {
 			return fmt.Sprintf("%09x: %08x", addr, read32(addr)), nil
 		},
 	}
+}
+
+// usbCmd exercises the AST2700 vHub gadget controller bring-up (hal/usb/vhub):
+// inspect the SCU + controller registers, bring the port up to the host-visible
+// "connect" state, poll for bus events, and detach again. This is the USB
+// equivalent of md/mw — a hardware bring-up probe. `up` and `down` mutate the
+// controller and its SCU clock/reset; `status` is read-only.
+//
+// The default target is the DC-SCM port-A gadget (vhuba0); pass `b0` to target
+// port B (vhubb0).
+func usbCmd() console.Command {
+	return console.Command{
+		Name: "usb",
+		Help: "usb status|up|down [a0|b0] — vHub gadget bring-up probe (default port a0)",
+		Complete: func(prev []string, _ string) []string {
+			switch len(prev) {
+			case 0:
+				return []string{"status", "up", "down"}
+			case 1:
+				return []string{"a0", "b0"}
+			}
+			return nil
+		},
+		Run: func(args []string) (string, error) {
+			if len(args) < 1 {
+				return "usage: usb status|up|down [a0|b0]", nil
+			}
+			port := vhub.VHubA0
+			if len(args) >= 2 {
+				switch args[1] {
+				case "a0":
+					port = vhub.VHubA0
+				case "b0":
+					port = vhub.VHubB0
+				default:
+					return "port must be a0 or b0", nil
+				}
+			}
+			c := vhub.New(port)
+
+			switch args[0] {
+			case "status":
+				return usbStatus(c, port), nil
+			case "up":
+				var b strings.Builder
+				fmt.Fprintf(&b, "%s: clock+reset+PHY bring-up and upstream connect...\n", port.Name)
+				c.Init()
+				c.Connect()
+				fmt.Fprintf(&b, "%s: connected, polling bus events for 2s...\n", port.Name)
+				seen := c.PollBusEvents(2 * time.Second)
+				b.WriteString(usbStatus(c, port))
+				fmt.Fprintf(&b, "observed ISR bits during poll: %#05x", seen)
+				if evs := vhub.DecodeEvents(seen); len(evs) > 0 {
+					b.WriteString("  [")
+					for i, e := range evs {
+						if i > 0 {
+							b.WriteString(" ")
+						}
+						b.WriteString(e.Name)
+					}
+					b.WriteString("]")
+				}
+				b.WriteByte('\n')
+				if seen&(1<<6) != 0 { // BUS_RESET
+					b.WriteString("=> host issued a BUS_RESET: the port is wired and the host sees the device\n")
+				} else {
+					b.WriteString("=> no bus reset seen: check the cable/host, port routing, or SCU mux\n")
+				}
+				return b.String(), nil
+			case "down":
+				c.Disconnect()
+				return fmt.Sprintf("%s: upstream disconnect asserted", port.Name), nil
+			default:
+				return "usage: usb status|up|down [a0|b0]", nil
+			}
+		},
+	}
+}
+
+// usbStatus formats a vHub controller + SCU register snapshot.
+func usbStatus(c *vhub.Controller, port vhub.Port) string {
+	s := c.Status()
+	var b strings.Builder
+	fmt.Fprintf(&b, "vHub %-7s base=%#08x irq=%d\n", port.Name, port.Base, port.IRQ)
+	fmt.Fprintf(&b, "  CTRL    = %#08x  phy_up=%v connected=%v\n", s.Ctrl, s.PHYUp(), s.Connected())
+	fmt.Fprintf(&b, "  CONF    = %#08x  (dev addr %d)\n", s.Conf, s.Conf&0x7f)
+	fmt.Fprintf(&b, "  IER     = %#08x  ISR = %#08x\n", s.IER, s.ISR)
+	fmt.Fprintf(&b, "  USBSTS  = %#08x  hispeed=%v frame=%d\n", s.USBSTS, s.HighSpeed(), s.FrameNumber())
+	fmt.Fprintf(&b, "  EP0CTRL = %#08x  EP1CTRL = %#08x\n", s.EP0Ctrl, s.EP1Ctrl)
+	fmt.Fprintf(&b, "  PHYCTRL = %#08x\n", s.PHYCtrl)
+	fmt.Fprintf(&b, "  SCU clkstop=%#08x reset=%#08x funcmux=%#08x\n", s.SCUClkStop, s.SCUReset, s.SCUFuncMux)
+	fmt.Fprintf(&b, "  clock_running=%v in_reset=%v\n", s.ClockRunning(port), s.InReset(port))
+	return b.String()
 }
 
 func parseHex(s string) (uint64, error) {
