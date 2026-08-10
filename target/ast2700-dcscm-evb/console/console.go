@@ -22,6 +22,7 @@ import (
 	"unsafe"
 
 	tboard "github.com/usbarmory/tamago/board/aspeed/ast2700dcscm"
+	"src.kyanite.computer/core/cfgstore"
 	"src.kyanite.computer/core/console"
 
 	"src.kyanite.computer/cairn/pkg/bmcdev"
@@ -37,6 +38,10 @@ type Options struct {
 	Chassis bmcdev.Chassis
 	Start   time.Time // process start, for uptime
 
+	// ConfigStore is the persistent Scree config volume, if available. When
+	// set, the `ls` command lists its stored files (config keys + TLS cert).
+	ConfigStore *cfgstore.Store
+
 	// Extra registers additional target commands (e.g. the video bring-up
 	// commands, present only in the ast2700video build).
 	Extra []console.Command
@@ -51,6 +56,7 @@ func NewShell(opt Options) *console.Shell {
 	cmds := []console.Command{
 		showCmd(opt),
 		powerCmd(opt),
+		lsCmd(opt),
 		mdCmd(),
 		mwCmd(),
 	}
@@ -134,6 +140,56 @@ func powerCmd(opt Options) console.Command {
 			}
 		},
 	}
+}
+
+// lsCmd lists the files stored in the persistent Scree config volume (config
+// keys and the web TLS certificate/key), with size and a content-kind hint —
+// an `ls`-style view of what lives in the flash filesystem.
+func lsCmd(opt Options) console.Command {
+	return console.Command{
+		Name: "ls",
+		Help: "ls — list files in the persistent Scree config store (name, size, kind)",
+		Run: func(_ []string) (string, error) {
+			if opt.ConfigStore == nil {
+				return "no persistent config store (running on RAM fallback)", nil
+			}
+			keys, err := opt.ConfigStore.Keys()
+			if err != nil {
+				return "", err
+			}
+			if len(keys) == 0 {
+				return "config store is empty", nil
+			}
+			var b strings.Builder
+			fmt.Fprintf(&b, "%-24s %8s  %s\n", "NAME", "SIZE", "KIND")
+			total := 0
+			for _, k := range keys {
+				v, err := opt.ConfigStore.Get(k)
+				if err != nil {
+					fmt.Fprintf(&b, "%-24s %8s  %s\n", k, "?", "err")
+					continue
+				}
+				total += len(v)
+				fmt.Fprintf(&b, "%-24s %8d  %s\n", k, len(v), contentKind(v))
+			}
+			fmt.Fprintf(&b, "%d file(s), %d bytes\n", len(keys), total)
+			return b.String(), nil
+		},
+	}
+}
+
+// contentKind classifies a stored value for the ls listing: "pem" for a
+// PEM-encoded blob, "text" for otherwise-printable data, else "binary".
+func contentKind(v []byte) string {
+	if strings.HasPrefix(string(v), "-----BEGIN") {
+		return "pem"
+	}
+	for _, c := range v {
+		if c != '\t' && c != '\n' && c != '\r' && (c < 0x20 || c > 0x7e) {
+			return "binary"
+		}
+	}
+	return "text"
 }
 
 // mdCmd implements md <hex-addr> [words]: 32-bit memory/MMIO display. This is a

@@ -120,6 +120,10 @@ var mgmtPlane *mgmt.Plane
 // false the management plane falls back to a RAM-backed store.
 var storeReady bool
 
+// configPersistent reports whether the config store is backed by the FMC SPI
+// NOR (persistent across reboots) rather than RAM.
+var configPersistent bool
+
 // beatConn is the heartbeat actor's authorized in-process connection. nil if the
 // management plane is unavailable.
 var beatConn *bus.Conn
@@ -208,16 +212,23 @@ func main() {
 	_ = operator.New(opCfg).Run(context.Background())
 }
 
-// initConfig opens the config store (RAM-backed for now). On real hardware this
-// is replaced by an SPI-NOR-backed cfgstore.Open.
+// initConfig opens the config store. It prefers the persistent FMC-backed Scree
+// config volume — so configuration and the web TLS certificate survive reboots
+// — and falls back to a RAM store if the flash volume is unavailable.
 func initConfig() {
-	store, err := cfgstore.OpenRAM(2 * 1024 * 1024)
-	if err != nil {
-		fmt.Printf("[cfg] store open error: %v — using defaults\n", err)
-		store, _ = cfgstore.OpenRAM(2 * 1024 * 1024)
+	if s, err := store.OpenConfig(store.DefaultNORSize); err == nil {
+		configStore = s
+		configPersistent = true
+	} else {
+		slog.Warn("cfg: flash config volume unavailable — using RAM store", "err", err)
+		s, err := cfgstore.OpenRAM(2 * 1024 * 1024)
+		if err != nil {
+			fmt.Printf("[cfg] store open error: %v — using defaults\n", err)
+			s, _ = cfgstore.OpenRAM(2 * 1024 * 1024)
+		}
+		configStore = s
 	}
-	configStore = store
-	cfg = config.New(store, ast2700Defaults)
+	cfg = config.New(configStore, ast2700Defaults)
 	fmt.Printf("[cfg] %s\n", cfg.SystemSummary())
 }
 
@@ -309,10 +320,11 @@ func initMgmt() {
 // console and the SSH server, so both expose the identical cairn command set.
 func consoleOptions() sercon.Options {
 	return sercon.Options{
-		Cfg:     cfg,
-		Chassis: board2700,
-		Start:   startTime,
-		Extra:   video.Commands(),
+		Cfg:         cfg,
+		Chassis:     board2700,
+		Start:       startTime,
+		ConfigStore: configStore,
+		Extra:       video.Commands(),
 	}
 }
 
@@ -421,7 +433,11 @@ func printStatus() {
 	fmt.Println("Services:")
 	fmt.Println("  [x] CA35 bring-up + UART console (upstream board)")
 	fmt.Println("  [x] slog/telemetry           (in-process ring buffer)")
-	fmt.Println("  [x] Config manager           (RAM-backed; SPI-NOR pending)")
+	if configPersistent {
+		fmt.Println("  [x] Config manager           (Scree over FMC SPI NOR; persistent)")
+	} else {
+		fmt.Println("  [x] Config manager           (RAM-backed; SPI-NOR pending)")
+	}
 	fmt.Println("  [x] Chassis driver           (stub; hardware pending)")
 	fmt.Println("  [x] Network                  (FTGMAC + lneto → net.SocketFunc)")
 	if storeReady {
