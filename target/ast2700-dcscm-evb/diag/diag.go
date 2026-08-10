@@ -112,6 +112,7 @@ func Run() {
 	addrModeProbe(ref, entryMode) // Q0.3
 	commandPathProbe(ref)         // can the CA35 command the FMC at all?
 	dmaProbe()                    // Q0.4b (controller DMA path; stub unless flashdiagdma)
+	writeProbe()                  // full WREN/erase/program/poll (stub unless flashdiagwrite)
 
 	p("-----------------------------------------------------------------------")
 	p("DIAG COMPLETE — see findings above. Idling.")

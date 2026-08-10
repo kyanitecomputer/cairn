@@ -36,11 +36,14 @@ CAIRN="$(cd "$HERE/../.." && pwd)"
 # DIAG=1 builds the read-only FMC/SPI-NOR hardware diagnostic payload
 # (`flashdiag` tag) instead of the normal management-plane payload, and writes
 # the image to cairn_ast2700_a2_flashdiag.bin. DIAGDMA=1 additionally enables
-# the opt-in DMA-scaling probe (`flashdiagdma`). Everything else in the A2
-# pipeline (BootMCU, prebuilts, SoC manifest regeneration, FLSH stitch) is
-# identical, so the diagnostic boots exactly like the real payload.
+# the opt-in DMA-scaling probe (`flashdiagdma`); DIAGWRITE=1 enables the
+# destructive write/erase validation (`flashdiagwrite`, operates only on a
+# scratch sector above the boot image). Everything else in the A2 pipeline
+# (BootMCU, prebuilts, SoC manifest regeneration, FLSH stitch) is identical, so
+# the diagnostic boots exactly like the real payload.
 DIAG="${DIAG:-0}"
 DIAGDMA="${DIAGDMA:-0}"
+DIAGWRITE="${DIAGWRITE:-0}"
 if [ "$DIAG" = "1" ]; then
 	IMAGE_NAME="cairn_ast2700_a2_flashdiag.bin"
 	PAYLOAD_ELF="$CAIRN/bin/cairn-flashdiag.elf"
@@ -82,12 +85,11 @@ if [ -n "${FACETUI:-}" ]; then
 	CAIRN_TAGS="facetui"
 fi
 if [ "$DIAG" = "1" ]; then
-	DIAG_TARGET="flashdiag"
-	if [ "$DIAGDMA" = "1" ]; then
-		DIAG_TARGET="flashdiag-dma"
-	fi
-	echo "    DIAG build: make $DIAG_TARGET (read-only FMC/SPI-NOR probe payload)"
-	( cd "$CAIRN" && TAMAGO="$TAMAGO" TAGS_EXTRA="$CAIRN_TAGS" make "$DIAG_TARGET" )
+	DIAG_EXTRA="$CAIRN_TAGS"
+	[ "$DIAGDMA" = "1" ] && DIAG_EXTRA="${DIAG_EXTRA:+$DIAG_EXTRA,}flashdiagdma"
+	[ "$DIAGWRITE" = "1" ] && DIAG_EXTRA="${DIAG_EXTRA:+$DIAG_EXTRA,}flashdiagwrite"
+	echo "    DIAG build: make flashdiag TAGS_EXTRA=$DIAG_EXTRA"
+	( cd "$CAIRN" && TAMAGO="$TAMAGO" TAGS_EXTRA="$DIAG_EXTRA" make flashdiag )
 else
 	( cd "$CAIRN" && TAMAGO="$TAMAGO" VIDEO="${VIDEO:-}" TAGS_EXTRA="$CAIRN_TAGS" make build )
 fi
