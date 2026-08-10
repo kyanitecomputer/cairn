@@ -16,6 +16,7 @@ package diag
 import (
 	"unsafe"
 
+	"github.com/kyanitecomputer/aspeed-go/reg"
 	"github.com/usbarmory/tamago/soc/aspeed/ast2700"
 )
 
@@ -41,11 +42,16 @@ func dmaProbe() {
 	const n = 16
 	p("[Q0.4b] DMA-scaling probe at flash offset %#x (%d bytes):", off, n)
 
-	// Reference: user-mode reads of the same offset, both addressings, using
-	// the MISC-clear+flush strategy (B).
+	// Reference: the auto-read window at the same offset (known-good), plus
+	// user-mode reads both addressings (now that CE write-enable is set).
+	refWin := make([]byte, n)
+	for i := 0; i < n; i++ {
+		refWin[i] = reg.Read8(fmcWin + uintptr(off) + uintptr(i))
+	}
 	refStrat := userStrategy{name: "B", clearMisc: true}
 	ref3 := userXfer(refStrat, opRead3B, off, 3, n, false)
 	ref4 := userXfer(refStrat, opRead4B, off, 4, n, false)
+	p("  auto-read window ref: %s", hex(refWin))
 	p("  user-mode ref 3B: %s", hex(ref3))
 	p("  user-mode ref 4B: %s", hex(ref4))
 
@@ -104,12 +110,14 @@ func dmaProbe() {
 		switch {
 		case !done:
 			p("    => TIMED OUT (encoding likely wrong or engine stalled)")
+		case eq(got, refWin):
+			p("    => MATCHES auto-read window ref: this flash-addr encoding is CORRECT")
 		case eq(got, ref4):
 			p("    => MATCHES 4B user-mode ref: this encoding is CORRECT (device in 4B)")
 		case eq(got, ref3):
 			p("    => MATCHES 3B user-mode ref: this encoding is CORRECT (device in 3B)")
 		default:
-			p("    => completed but data mismatches both refs (wrong address space?)")
+			p("    => completed but data mismatches all refs (wrong address space?)")
 		}
 	}
 }

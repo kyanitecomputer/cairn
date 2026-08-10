@@ -76,6 +76,10 @@ const (
 	ceStop            = 1 << 2
 	ioModeMask        = 0xf << 28
 	clockBits         = 0x0f000f00 // CLOCK_RATE_LOW [11:8] | CLOCK_RATE_HIGH [27:24]
+
+	// FLASH_CONFIG (0x000) CE_WRITE_ENABLE bits [19:16], one per CE. Must be
+	// set for the controller to clock out user-mode/normal-mode window writes.
+	ce0WriteEnable = 1 << 16
 )
 
 // SPI NOR opcodes used read-only.
@@ -266,6 +270,13 @@ func fifoPort() uintptr {
 func userXfer(s userStrategy, op byte, addr uint32, addrLen, n int, dummyWrite bool) []byte {
 	savedCE := r32(rCE0Ctrl)
 	savedMisc := r32(rMisc)
+	savedCfg := r32(rFlashConfig)
+	// Enable the CE0 controller write path so user-mode opcode/data writes to
+	// the window are actually clocked out. Without this (FLASH_CONFIG
+	// CE_WRITE_ENABLE bit 16 = 0, as left at CA35 entry) the controller drops
+	// window writes and every user-mode command returns zeros. This is a
+	// register write only; RDID/RDSR remain read commands (non-destructive).
+	w32(rFlashConfig, savedCfg|ce0WriteEnable)
 	if s.clearMisc {
 		w32(rMisc, 0)
 	}
@@ -297,6 +308,7 @@ func userXfer(s userStrategy, op byte, addr uint32, addrLen, n int, dummyWrite b
 	w32(rCE0Ctrl, cu|ceStop)
 	w32(rCE0Ctrl, savedCE)
 	w32(rMisc, savedMisc)
+	w32(rFlashConfig, savedCfg)
 	return out
 }
 
@@ -384,9 +396,12 @@ func commandPathProbe(ref []byte) {
 	w32(rMisc, savedMisc)
 	p("  normal-read (CMD_MODE=1, COMMAND=0x13): %s (match=%v)", hex(got), eq(got, refN))
 
-	// (2) engine-shift observation around a user-mode opcode write.
+	// (2) engine-shift observation around a user-mode opcode write, now with
+	// the CE0 write path enabled (the fix identified from run 3).
 	es0, dim0, fl0 := r32(rEngineStat), r32(rDataInMon), r32(rDmaFifoLen)
 	sMisc := r32(rMisc)
+	sCfg := r32(rFlashConfig)
+	w32(rFlashConfig, sCfg|ce0WriteEnable)
 	w32(rMisc, 0)
 	cu := (saved &^ (ioModeMask | cmdModeMask)) | cmdModeUser
 	w32(rCE0Ctrl, cu|ceStop)
@@ -398,6 +413,7 @@ func commandPathProbe(ref []byte) {
 	w32(rCE0Ctrl, cu|ceStop)
 	w32(rCE0Ctrl, saved)
 	w32(rMisc, sMisc)
+	w32(rFlashConfig, sCfg)
 	p("  engine before: STAT=%#010x DATA_IN=%#010x FIFO_LEN=%#010x", es0, dim0, fl0)
 	p("  engine after : STAT=%#010x DATA_IN=%#010x FIFO_LEN=%#010x", es1, dim1, fl1)
 	if es0 != es1 || dim0 != dim1 || fl0 != fl1 {
