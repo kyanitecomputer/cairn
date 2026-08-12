@@ -278,29 +278,35 @@ func mwCmd() console.Command {
 func usbCmd() console.Command {
 	return console.Command{
 		Name: "usb",
-		Help: "usb status|diag|up|down [a0|b0] — vHub gadget bring-up probe (default a0)",
+		Help: "usb status|diag|up|down [a1|b1|a0|b0] — vHub gadget bring-up probe (default a1, host-facing)",
 		Complete: func(prev []string, _ string) []string {
 			switch len(prev) {
 			case 0:
 				return []string{"status", "diag", "up", "down"}
 			case 1:
-				return []string{"a0", "b0"}
+				return []string{"a1", "b1", "a0", "b0"}
 			}
 			return nil
 		},
 		Run: func(args []string) (string, error) {
 			if len(args) < 1 {
-				return "usage: usb status|diag|up|down [a0|b0]", nil
+				return "usage: usb status|diag|up|down [a1|b1|a0|b0]", nil
 			}
-			port := vhub.VHubA0
+			// a1/b1 are the host-facing vHub1 gadgets (routed to the physical
+			// PHY); a0/b0 are the internal EHCI-companion vHubs.
+			port := vhub.VHubA1
 			if len(args) >= 2 {
 				switch args[1] {
+				case "a1":
+					port = vhub.VHubA1
+				case "b1":
+					port = vhub.VHubB1
 				case "a0":
 					port = vhub.VHubA0
 				case "b0":
 					port = vhub.VHubB0
 				default:
-					return "port must be a0 or b0", nil
+					return "port must be a1, b1, a0 or b0", nil
 				}
 			}
 			c := vhub.New(port)
