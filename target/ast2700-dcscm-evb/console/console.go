@@ -265,21 +265,24 @@ func mwCmd() console.Command {
 }
 
 // usbCmd exercises the AST2700 vHub gadget controller bring-up (hal/usb/vhub):
-// inspect the SCU + controller registers, bring the port up to the host-visible
-// "connect" state, poll for bus events, and detach again. This is the USB
-// equivalent of md/mw — a hardware bring-up probe. `up` and `down` mutate the
-// controller and its SCU clock/reset; `status` is read-only.
+// inspect the SCU + controller registers, run a step-by-step diagnostic
+// bring-up that verifies every clock/reset/access-control write, connect to the
+// host, and detach. This is the USB equivalent of md/mw — a hardware bring-up
+// probe with heavy instrumentation so clock/reset/mux problems surface early.
 //
-// The default target is the DC-SCM port-A gadget (vhuba0); pass `b0` to target
-// port B (vhubb0).
+// Subcommands: `status` (read-only snapshot), `diag` (full instrumented
+// bring-up + connect + bus poll + anomaly summary), `up` (bring-up + connect +
+// poll), `down` (disconnect). `diag`/`up`/`down` mutate the controller and its
+// SCU clock/reset/mux. Default target is the DC-SCM port-A gadget (vhuba0);
+// pass `b0` for vhubb0.
 func usbCmd() console.Command {
 	return console.Command{
 		Name: "usb",
-		Help: "usb status|up|down [a0|b0] — vHub gadget bring-up probe (default port a0)",
+		Help: "usb status|diag|up|down [a0|b0] — vHub gadget bring-up probe (default a0)",
 		Complete: func(prev []string, _ string) []string {
 			switch len(prev) {
 			case 0:
-				return []string{"status", "up", "down"}
+				return []string{"status", "diag", "up", "down"}
 			case 1:
 				return []string{"a0", "b0"}
 			}
@@ -287,7 +290,7 @@ func usbCmd() console.Command {
 		},
 		Run: func(args []string) (string, error) {
 			if len(args) < 1 {
-				return "usage: usb status|up|down [a0|b0]", nil
+				return "usage: usb status|diag|up|down [a0|b0]", nil
 			}
 			port := vhub.VHubA0
 			if len(args) >= 2 {
@@ -304,57 +307,155 @@ func usbCmd() console.Command {
 
 			switch args[0] {
 			case "status":
-				return usbStatus(c, port), nil
-			case "up":
 				var b strings.Builder
-				fmt.Fprintf(&b, "%s: clock+reset+PHY bring-up and upstream connect...\n", port.Name)
-				c.Init()
-				c.Connect()
-				fmt.Fprintf(&b, "%s: connected, polling bus events for 2s...\n", port.Name)
-				seen := c.PollBusEvents(2 * time.Second)
-				b.WriteString(usbStatus(c, port))
-				fmt.Fprintf(&b, "observed ISR bits during poll: %#05x", seen)
-				if evs := vhub.DecodeEvents(seen); len(evs) > 0 {
-					b.WriteString("  [")
-					for i, e := range evs {
-						if i > 0 {
-							b.WriteString(" ")
-						}
-						b.WriteString(e.Name)
-					}
-					b.WriteString("]")
+				usbPortInfo(&b, port)
+				usbState(&b, c, port)
+				return b.String(), nil
+
+			case "diag", "up":
+				var b strings.Builder
+				usbPortInfo(&b, port)
+
+				if args[0] == "diag" {
+					b.WriteString("\n--- pre-bring-up state (as left by boot firmware) ---\n")
+					usbState(&b, c, port)
 				}
-				b.WriteByte('\n')
-				if seen&(1<<6) != 0 { // BUS_RESET
-					b.WriteString("=> host issued a BUS_RESET: the port is wired and the host sees the device\n")
-				} else {
-					b.WriteString("=> no bus reset seen: check the cable/host, port routing, or SCU mux\n")
+
+				b.WriteString("\n--- bring-up steps (each write verified by read-back) ---\n")
+				steps := c.InitSteps()
+				anomalies := usbSteps(&b, steps)
+
+				b.WriteString("\n--- upstream connect + 2s bus-event poll ---\n")
+				c.Connect()
+				seen := c.PollBusEvents(2 * time.Second)
+				usbBusEvents(&b, seen)
+
+				if args[0] == "diag" {
+					b.WriteString("\n--- post-connect state ---\n")
+					usbState(&b, c, port)
+					b.WriteString("\n--- summary ---\n")
+					usbSummary(&b, c.Status(), port, steps, seen, anomalies)
 				}
 				return b.String(), nil
+
 			case "down":
 				c.Disconnect()
-				return fmt.Sprintf("%s: upstream disconnect asserted", port.Name), nil
+				return fmt.Sprintf("%s: upstream disconnect asserted (CTRL now %#08x)",
+					port.Name, c.Status().Ctrl), nil
+
 			default:
-				return "usage: usb status|up|down [a0|b0]", nil
+				return "usage: usb status|diag|up|down [a0|b0]", nil
 			}
 		},
 	}
 }
 
-// usbStatus formats a vHub controller + SCU register snapshot.
-func usbStatus(c *vhub.Controller, port vhub.Port) string {
+// usbPortInfo prints the static port wiring (bases and the SCU bits the driver
+// will touch), so a wrong constant is obvious before anything is poked.
+func usbPortInfo(b *strings.Builder, p vhub.Port) {
+	fmt.Fprintf(b, "vHub %s\n", p.Name)
+	fmt.Fprintf(b, "  ctrl base   = %#010x   irq (GIC SPI) = %d\n", p.Base, p.IRQ)
+	fmt.Fprintf(b, "  scu base    = %#010x   io-die = %v\n", p.SCUBase, p.IODie)
+	fmt.Fprintf(b, "  clock bit   = %#010x   (SCU_CLK_STOP; 0 = running)\n", p.ClockBit)
+	fmt.Fprintf(b, "  reset bit   = %#010x   (SCU_RST_CTRL2@0x220)\n", p.ResetBit)
+	fmt.Fprintf(b, "  func mux    = off %#05x mask %#010x device-val %#010x\n", p.FuncMux, p.FuncMask, p.FuncBits)
+}
+
+// usbState prints a fully decoded snapshot of the controller and its SCU
+// clock/reset/mux, so missing clocks / wrong access-control / wrong mux are
+// immediately visible.
+func usbState(b *strings.Builder, c *vhub.Controller, port vhub.Port) {
 	s := c.Status()
-	var b strings.Builder
-	fmt.Fprintf(&b, "vHub %-7s base=%#08x irq=%d\n", port.Name, port.Base, port.IRQ)
-	fmt.Fprintf(&b, "  CTRL    = %#08x  phy_up=%v connected=%v\n", s.Ctrl, s.PHYUp(), s.Connected())
-	fmt.Fprintf(&b, "  CONF    = %#08x  (dev addr %d)\n", s.Conf, s.Conf&0x7f)
-	fmt.Fprintf(&b, "  IER     = %#08x  ISR = %#08x\n", s.IER, s.ISR)
-	fmt.Fprintf(&b, "  USBSTS  = %#08x  hispeed=%v frame=%d\n", s.USBSTS, s.HighSpeed(), s.FrameNumber())
-	fmt.Fprintf(&b, "  EP0CTRL = %#08x  EP1CTRL = %#08x\n", s.EP0Ctrl, s.EP1Ctrl)
-	fmt.Fprintf(&b, "  PHYCTRL = %#08x\n", s.PHYCtrl)
-	fmt.Fprintf(&b, "  SCU clkstop=%#08x reset=%#08x funcmux=%#08x\n", s.SCUClkStop, s.SCUReset, s.SCUFuncMux)
-	fmt.Fprintf(&b, "  clock_running=%v in_reset=%v\n", s.ClockRunning(port), s.InReset(port))
-	return b.String()
+	mux, muxMasked := port.MuxMode(s.SCUFuncMux)
+
+	fmt.Fprintf(b, "  SCU clkstop = %#010x   clock_running=%v\n", s.SCUClkStop, s.ClockRunning(port))
+	fmt.Fprintf(b, "  SCU reset   = %#010x   in_reset=%v\n", s.SCUReset, s.InReset(port))
+	fmt.Fprintf(b, "  SCU funcmux = %#010x   mode=%s (masked %#010x)\n", s.SCUFuncMux, mux, muxMasked)
+	fmt.Fprintf(b, "  CTRL        = %#010x   phy_up=%v connected=%v %s\n", s.Ctrl, s.PHYUp(), s.Connected(), names(vhub.DecodeCtrl(s.Ctrl)))
+	fmt.Fprintf(b, "  CONF        = %#010x   dev_addr=%d\n", s.Conf, s.Conf&0x7f)
+	fmt.Fprintf(b, "  USBSTS      = %#010x   hispeed=%v frame=%d\n", s.USBSTS, s.HighSpeed(), s.FrameNumber())
+	fmt.Fprintf(b, "  IER / ISR   = %#010x / %#010x %s\n", s.IER, s.ISR, names(vhub.DecodeEvents(s.ISR)))
+	fmt.Fprintf(b, "  EP0 / EP1   = %#010x / %#010x\n", s.EP0Ctrl, s.EP1Ctrl)
+	fmt.Fprintf(b, "  PHY_CTRL    = %#010x   %s\n", s.PHYCtrl, names(vhub.DecodePHY(s.PHYCtrl)))
+
+	if s.Ctrl == 0xffffffff {
+		b.WriteString("  !! CTRL reads all-ones: controller not clocked or not mapped\n")
+	}
+}
+
+// usbSteps prints each recorded bring-up step with a pass/fail marker and the
+// before->after values, returning the number of failed (mismatched) steps.
+func usbSteps(b *strings.Builder, steps []vhub.Step) int {
+	fails := 0
+	for _, s := range steps {
+		if s.RegName == "" { // pure delay / informational
+			fmt.Fprintf(b, "  ..   %s\n", s.Name)
+			continue
+		}
+		mark := "  ok "
+		if s.Checked() && !s.OK() {
+			mark = "  !! "
+			fails++
+		}
+		fmt.Fprintf(b, "%s %-38s %s@%#010x  %08x -> %08x", mark, s.Name, s.RegName, s.Addr, s.Before, s.After)
+		if s.Checked() {
+			fmt.Fprintf(b, "  (want set %08x clr %08x)", s.WantSet, s.WantClr)
+		}
+		b.WriteByte('\n')
+		if s.Note != "" {
+			fmt.Fprintf(b, "         %s\n", s.Note)
+		}
+	}
+	return fails
+}
+
+// usbBusEvents prints the ISR bits observed during the poll and interprets the
+// key signal (BUS_RESET = the host enumerated and saw the device).
+func usbBusEvents(b *strings.Builder, seen uint32) {
+	fmt.Fprintf(b, "  observed ISR bits: %#010x %s\n", seen, names(vhub.DecodeEvents(seen)))
+	switch {
+	case seen&(1<<6) != 0: // BUS_RESET
+		b.WriteString("  => BUS_RESET seen: the port is wired and the host sees the device\n")
+	case seen != 0:
+		b.WriteString("  => bus activity seen but no reset; host may still be settling\n")
+	default:
+		b.WriteString("  => no bus activity: check cable/host, port routing, PHY, or mux\n")
+	}
+}
+
+// usbSummary emits a short pass/fail verdict flagging the classic bring-up
+// failure modes (SCU locked, clock gated, reset stuck, wrong mux, PHY down).
+func usbSummary(b *strings.Builder, s vhub.Status, port vhub.Port, steps []vhub.Step, seen uint32, stepFails int) {
+	warn := func(cond bool, msg string) {
+		if cond {
+			fmt.Fprintf(b, "  !! %s\n", msg)
+		}
+	}
+	mux, _ := port.MuxMode(s.SCUFuncMux)
+	warn(stepFails > 0, fmt.Sprintf("%d bring-up step(s) failed read-back verification (see !! above)", stepFails))
+	warn(!s.ClockRunning(port), "port clock still gated: SCU write blocked (locked?) or wrong clock bit")
+	warn(s.InReset(port), "port still in reset: SCU write blocked or wrong reset bit")
+	warn(mux != "device", "port function mux is not device mode: gadget will not attach")
+	warn(!s.PHYUp(), "PHY not up (PHY_CLK/PHY_RESET_DIS not set)")
+	warn(s.Ctrl == 0xffffffff, "controller unreachable (CTRL all-ones)")
+	warn(!s.Connected(), "upstream not connected (pull-up not asserted)")
+	warn(seen == 0, "no bus events observed during poll")
+	if stepFails == 0 && s.ClockRunning(port) && !s.InReset(port) && mux == "device" &&
+		s.PHYUp() && s.Connected() && seen != 0 {
+		b.WriteString("  OK: clocks/reset/mux/PHY all good and bus activity seen\n")
+	}
+}
+
+// names joins decoded event/bit names into a bracketed list, or "" if empty.
+func names(evs []vhub.Event) string {
+	if len(evs) == 0 {
+		return ""
+	}
+	parts := make([]string, len(evs))
+	for i, e := range evs {
+		parts[i] = e.Name
+	}
+	return "[" + strings.Join(parts, " ") + "]"
 }
 
 func parseHex(s string) (uint64, error) {
