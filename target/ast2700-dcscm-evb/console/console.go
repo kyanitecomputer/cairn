@@ -357,7 +357,8 @@ func usbPortInfo(b *strings.Builder, p vhub.Port) {
 	fmt.Fprintf(b, "  ctrl base   = %#010x   irq (GIC SPI) = %d\n", p.Base, p.IRQ)
 	fmt.Fprintf(b, "  scu base    = %#010x   io-die = %v\n", p.SCUBase, p.IODie)
 	fmt.Fprintf(b, "  clock bit   = %#010x   (SCU_CLK_STOP; 0 = running)\n", p.ClockBit)
-	fmt.Fprintf(b, "  reset bit   = %#010x   (SCU_RST_CTRL2@0x220)\n", p.ResetBit)
+	fmt.Fprintf(b, "  reset bit   = %#010x   (SCU_RST_CTRL2@0x220, controller)\n", p.ResetBit)
+	fmt.Fprintf(b, "  phy reset   = %#010x   phy base = %#010x (shared USB2 PHY)\n", p.PHYResetBit, p.PHYBase)
 	fmt.Fprintf(b, "  func mux    = off %#05x mask %#010x device-val %#010x\n", p.FuncMux, p.FuncMask, p.FuncBits)
 }
 
@@ -377,6 +378,11 @@ func usbState(b *strings.Builder, c *vhub.Controller, port vhub.Port) {
 	fmt.Fprintf(b, "  IER / ISR   = %#010x / %#010x %s\n", s.IER, s.ISR, names(vhub.DecodeEvents(s.ISR)))
 	fmt.Fprintf(b, "  EP0 / EP1   = %#010x / %#010x\n", s.EP0Ctrl, s.EP1Ctrl)
 	fmt.Fprintf(b, "  PHY_CTRL    = %#010x   %s\n", s.PHYCtrl, names(vhub.DecodePHY(s.PHYCtrl)))
+	if s.HasPHY {
+		fmt.Fprintf(b, "  USB2 PHY    = STS2 %#010x (clk60=%v) STS3 %#010x (preemph2=%v)\n",
+			s.PHYCtlSts2, s.PHYCtlSts2&(0x3<<26) == (0x3<<26),
+			s.PHYCtlSts3, s.PHYCtlSts3&(0x3<<21) == (0x2<<21))
+	}
 
 	if s.Ctrl == 0xffffffff {
 		b.WriteString("  !! CTRL reads all-ones: controller not clocked or not mapped\n")
@@ -436,7 +442,7 @@ func usbSummary(b *strings.Builder, s vhub.Status, port vhub.Port, steps []vhub.
 	warn(!s.ClockRunning(port), "port clock still gated: SCU write blocked (locked?) or wrong clock bit")
 	warn(s.InReset(port), "port still in reset: SCU write blocked or wrong reset bit")
 	warn(mux != "device", "port function mux is not device mode: gadget will not attach")
-	warn(!s.PHYUp(), "PHY not up (PHY_CLK/PHY_RESET_DIS not set)")
+	warn(!s.PHYUp(), "core PHY bits not set (CTRL writes dropped): USB2 PHY not clocked — check the PHY reset (PORTx_VHUB) and PHY tuning")
 	warn(s.Ctrl == 0xffffffff, "controller unreachable (CTRL all-ones)")
 	warn(!s.Connected(), "upstream not connected (pull-up not asserted)")
 	warn(seen == 0, "no bus events observed during poll")
