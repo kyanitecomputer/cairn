@@ -21,6 +21,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/kyanitecomputer/aspeed-go/hal/usb/ehci"
 	"github.com/kyanitecomputer/aspeed-go/hal/usb/vhub"
 	tboard "github.com/usbarmory/tamago/board/aspeed/ast2700dcscm"
 	"src.kyanite.computer/core/cfgstore"
@@ -61,6 +62,7 @@ func NewShell(opt Options) *console.Shell {
 		mdCmd(),
 		mwCmd(),
 		usbCmd(),
+		ehciCmd(),
 	}
 	cmds = append(cmds, opt.Extra...)
 	return console.New(console.Config{
@@ -456,6 +458,213 @@ func usbSummary(b *strings.Builder, s vhub.Status, port vhub.Port, steps []vhub.
 		s.PHYUp() && s.Connected() && seen != 0 {
 		b.WriteString("  OK: clocks/reset/mux/PHY all good and bus activity seen\n")
 	}
+}
+
+// ehciCmd exercises the AST2700 EHCI USB-2.0 *host* controller bring-up
+// (hal/usb/ehci) so a device plugged into the board's physical USB port can be
+// detected. It is the host-side counterpart of the `usb` (gadget) command: same
+// instrumented, read-back-verified bring-up trace, but driving a standard EHCI
+// operational register set behind the SCU clock/reset/routing wrapper.
+//
+// The default (and, for now, only) target is die1 Port D (`ehci3`), which on
+// the DC-SCM is wired to the card's physical USB Type-A receptacle; a SuperSpeed
+// stick there appears here at high speed.
+//
+// Subcommands: `status` (read-only snapshot), `diag` (full instrumented
+// bring-up + port reset if a device is present + speed report + summary),
+// `reset` (drive a root-port reset and report the resulting speed). `diag`/
+// `reset` mutate the controller and its SCU clock/reset/route.
+func ehciCmd() console.Command {
+	return console.Command{
+		Name: "ehci",
+		Help: "ehci status|diag|reset [d] — EHCI USB2 host bring-up probe (default Port D, physical port)",
+		Complete: func(prev []string, _ string) []string {
+			switch len(prev) {
+			case 0:
+				return []string{"status", "diag", "reset"}
+			case 1:
+				return []string{"d"}
+			}
+			return nil
+		},
+		Run: func(args []string) (string, error) {
+			if len(args) < 1 {
+				return "usage: ehci status|diag|reset [d]", nil
+			}
+			port := ehci.EHCI3PortD
+			if len(args) >= 2 && args[1] != "d" {
+				return "port must be d (ehci3, the only wired host port)", nil
+			}
+			c := ehci.New(port)
+
+			switch args[0] {
+			case "status":
+				var b strings.Builder
+				ehciPortInfo(&b, port)
+				ehciState(&b, c, port)
+				return b.String(), nil
+
+			case "diag":
+				var b strings.Builder
+				ehciPortInfo(&b, port)
+
+				b.WriteString("\n--- pre-bring-up state (as left by boot firmware) ---\n")
+				ehciState(&b, c, port)
+
+				b.WriteString("\n--- bring-up steps (each write verified by read-back) ---\n")
+				steps := c.InitSteps()
+				anomalies := ehciSteps(&b, steps)
+
+				b.WriteString("\n--- post-bring-up state ---\n")
+				st := c.Status()
+				ehciState(&b, c, port)
+
+				b.WriteString("\n--- poll root port for a device (up to 5s) ---\n")
+				portsc, connected, waited := c.PollConnect(5 * time.Second)
+				fmt.Fprintf(&b, "  PORTSC %#010x connected=%v after %v %s\n",
+					portsc, connected, waited.Round(time.Millisecond), names2(ehci.DecodePortSC(portsc)))
+				st = c.Status()
+
+				if connected {
+					b.WriteString("\n--- device present: driving root-port reset ---\n")
+					before, after := c.ResetPort()
+					fmt.Fprintf(&b, "  PORTSC %#010x -> %#010x\n", before, after)
+					st = c.Status()
+					fmt.Fprintf(&b, "  speed after reset: %s\n", st.Speed())
+				}
+
+				b.WriteString("\n--- summary ---\n")
+				ehciSummary(&b, st, port, anomalies)
+				return b.String(), nil
+
+			case "reset":
+				var b strings.Builder
+				portsc, connected, waited := c.PollConnect(5 * time.Second)
+				fmt.Fprintf(&b, "%s: waited %v for connect, PORTSC %#010x connected=%v\n",
+					port.Name, waited.Round(time.Millisecond), portsc, connected)
+				if !connected {
+					b.WriteString("no device connected — nothing to reset\n")
+					return b.String(), nil
+				}
+				before, after := c.ResetPort()
+				fmt.Fprintf(&b, "root-port reset PORTSC %#010x -> %#010x, speed=%s\n",
+					before, after, c.Status().Speed())
+				return b.String(), nil
+
+			default:
+				return "usage: ehci status|diag|reset [d]", nil
+			}
+		},
+	}
+}
+
+// ehciPortInfo prints the static host-port wiring (bases and the SCU bits the
+// driver will touch), so a wrong constant is obvious before anything is poked.
+func ehciPortInfo(b *strings.Builder, p ehci.Port) {
+	fmt.Fprintf(b, "EHCI %s (USB2 host)\n", p.Name)
+	fmt.Fprintf(b, "  ctrl base   = %#010x   irq = %d\n", p.Base, p.IRQ)
+	fmt.Fprintf(b, "  scu base    = %#010x\n", p.SCUBase)
+	fmt.Fprintf(b, "  clkstop reg = %#05x       clock bit = %#010x (0 = running)\n", p.ClkStopReg, p.ClockBit)
+	fmt.Fprintf(b, "  reset bit   = %#010x   (SCU_RST_CTRL2@0x220)\n", p.ResetBit)
+	fmt.Fprintf(b, "  func route  = off %#05x mask %#010x host-val %#010x\n", p.FuncMux, p.FuncMask, p.FuncBits)
+	fmt.Fprintf(b, "  phy base    = %#010x   (shared Port D USB2 PHY)\n", p.PHYBase)
+}
+
+// ehciState prints a fully decoded snapshot of the controller and its SCU
+// clock/reset/route so missing clocks / wrong routing / a disconnected port are
+// immediately visible.
+func ehciState(b *strings.Builder, c *ehci.Controller, port ehci.Port) {
+	s := c.Status()
+	mux, muxMasked := port.MuxMode(s.SCUFuncMux)
+
+	fmt.Fprintf(b, "  SCU clkstop = %#010x   clock_running=%v\n", s.SCUClkStop, s.ClockRunning(port))
+	fmt.Fprintf(b, "  SCU reset   = %#010x   in_reset=%v\n", s.SCUReset, s.InReset(port))
+	fmt.Fprintf(b, "  SCU route   = %#010x   mode=%s (masked %#010x)\n", s.SCUFuncMux, mux, muxMasked)
+	fmt.Fprintf(b, "  CAPLENGTH   = %#04x         HCIVERSION=%#06x nports=%d ppc=%v\n",
+		s.CapLength, s.HCIVersion, s.NPorts(), s.PortPowerControl())
+	fmt.Fprintf(b, "  USBCMD      = %#010x   running=%v %s\n", s.USBCmd, s.Running(), names2(ehci.DecodeCmd(s.USBCmd)))
+	fmt.Fprintf(b, "  USBSTS      = %#010x   halted=%v %s\n", s.USBSts, s.Halted(), names2(ehci.DecodeSts(s.USBSts)))
+	fmt.Fprintf(b, "  CONFIGFLAG  = %#010x   configured=%v\n", s.ConfigF, s.Configured())
+	fmt.Fprintf(b, "  PORTSC      = %#010x   connected=%v enabled=%v powered=%v %s\n",
+		s.PortSC, s.DeviceConnected(), s.PortEnabled(), s.PortPowered(), names2(ehci.DecodePortSC(s.PortSC)))
+	fmt.Fprintf(b, "                             speed=%s companion_owned=%v\n", s.Speed(), s.OwnedByCompanion())
+	if s.HasPHY {
+		fmt.Fprintf(b, "  USB2 PHY    = STS2 %#010x (clk60=%v) STS3 %#010x (preemph2=%v)\n",
+			s.PHYCtlSts2, s.PHYCtlSts2&(0x3<<26) == (0x3<<26),
+			s.PHYCtlSts3, s.PHYCtlSts3&(0x3<<21) == (0x2<<21))
+	}
+	if s.CapLength == 0xff {
+		b.WriteString("  !! CAPLENGTH reads 0xff: controller not clocked or not mapped\n")
+	}
+}
+
+// ehciSteps prints each bring-up step with a pass/fail marker and before->after
+// values, returning the number of failed (mismatched) steps.
+func ehciSteps(b *strings.Builder, steps []ehci.Step) int {
+	fails := 0
+	for _, s := range steps {
+		if s.RegName == "" { // pure delay / informational
+			fmt.Fprintf(b, "  ..   %s\n", s.Name)
+			continue
+		}
+		mark := "  ok "
+		if s.Checked() && !s.OK() {
+			mark = "  !! "
+			fails++
+		}
+		fmt.Fprintf(b, "%s %-38s %s@%#010x  %08x -> %08x", mark, s.Name, s.RegName, s.Addr, s.Before, s.After)
+		if s.Checked() {
+			fmt.Fprintf(b, "  (want set %08x clr %08x)", s.WantSet, s.WantClr)
+		}
+		b.WriteByte('\n')
+		if s.Note != "" {
+			fmt.Fprintf(b, "         %s\n", s.Note)
+		}
+	}
+	return fails
+}
+
+// ehciSummary emits a short pass/fail verdict flagging the classic host bring-up
+// failure modes (SCU locked, clock gated, reset stuck, wrong routing, HC not
+// responding) and reports whether a device was detected.
+func ehciSummary(b *strings.Builder, s ehci.Status, port ehci.Port, stepFails int) {
+	warn := func(cond bool, msg string) {
+		if cond {
+			fmt.Fprintf(b, "  !! %s\n", msg)
+		}
+	}
+	mux, _ := port.MuxMode(s.SCUFuncMux)
+	warn(stepFails > 0, fmt.Sprintf("%d bring-up step(s) failed read-back verification (see !! above)", stepFails))
+	warn(!s.ClockRunning(port), "port clock still gated: SCU write blocked (locked?) or wrong clock bit")
+	warn(s.InReset(port), "port still in reset: SCU write blocked or wrong reset bit")
+	warn(mux != "host", "port not routed to the EHCI host: device will not appear")
+	warn(s.CapLength == 0xff, "controller unreachable (CAPLENGTH 0xff): core unclocked or PHY down")
+	warn(!s.Configured(), "CONFIGFLAG not set: ports not handed to EHCI")
+
+	switch {
+	case s.CapLength == 0 || s.CapLength == 0xff:
+		b.WriteString("  !! host controller not reachable — check clock/reset/route above\n")
+	case s.DeviceConnected() && s.PortEnabled():
+		fmt.Fprintf(b, "  OK: host up, device connected and enabled at %s\n", s.Speed())
+	case s.DeviceConnected() && s.OwnedByCompanion():
+		b.WriteString("  device connected but low/full-speed: released to UHCI companion (not yet driven)\n")
+	case s.DeviceConnected():
+		fmt.Fprintf(b, "  device connected (%s) but port not enabled — reset may need a retry\n", s.Speed())
+	default:
+		b.WriteString("  host up, no device connected — plug a stick into the card's USB port and re-run\n")
+	}
+}
+
+// names2 joins decoded EHCI event names into a bracketed list, or "" if empty.
+func names2(evs []ehci.Event) string {
+	if len(evs) == 0 {
+		return ""
+	}
+	parts := make([]string, len(evs))
+	for i, e := range evs {
+		parts[i] = e.Name
+	}
+	return "[" + strings.Join(parts, " ") + "]"
 }
 
 // names joins decoded event/bit names into a bracketed list, or "" if empty.
