@@ -606,18 +606,25 @@ func ehciState(b *strings.Builder, c *ehci.Controller, port ehci.Port) {
 // enabled/speed verdict.
 func ehciResetResult(b *strings.Builder, r ehci.ResetResult) {
 	fmt.Fprintf(b, "  before      = %#010x %s\n", r.Before, names2(ehci.DecodePortSC(r.Before)))
-	for i, s := range r.Samples {
-		fmt.Fprintf(b, "  sample %-2d   = %#010x %s\n", i, s, names2(ehci.DecodePortSC(s)))
+	for i, a := range r.Attempts {
+		fmt.Fprintf(b, "  attempt %d:\n", i+1)
+		fmt.Fprintf(b, "    wrote PR  = %#010x\n", a.Written)
+		fmt.Fprintf(b, "    PR set    = %#010x %s (reset bit landed=%v)\n",
+			a.PRAsserted, names2(ehci.DecodePortSC(a.PRAsserted)), a.PRAsserted&(1<<8) != 0)
+		fmt.Fprintf(b, "    mid-reset = %#010x %s\n", a.DuringReset, names2(ehci.DecodePortSC(a.DuringReset)))
+		fmt.Fprintf(b, "    PR clear  = %#010x %s\n", a.AfterClear, names2(ehci.DecodePortSC(a.AfterClear)))
+		fmt.Fprintf(b, "    settled   = %#010x %s\n", a.Settled, names2(ehci.DecodePortSC(a.Settled)))
 	}
-	fmt.Fprintf(b, "  after       = %#010x (attempts=%d) enabled=%v speed=%s\n",
-		r.After, r.Attempts, r.Enabled, r.Speed)
+	fmt.Fprintf(b, "  after       = %#010x enabled=%v speed=%s\n", r.After, r.Enabled, r.Speed)
 	switch {
 	case r.Enabled:
 		fmt.Fprintf(b, "  => port ENABLED at %s — ready to enumerate\n", r.Speed)
+	case len(r.Attempts) > 0 && r.Attempts[0].PRAsserted&(1<<8) == 0:
+		b.WriteString("  => PortReset never read back set: PORTSC writes are being dropped (not an HS-handshake issue)\n")
 	case r.After&(1<<0) == 0:
-		b.WriteString("  => device dropped off during reset (no connect): signal/PHY or a full-speed device that needs the companion\n")
+		b.WriteString("  => device dropped off during reset (no connect): signal/PHY issue\n")
 	default:
-		b.WriteString("  => still connected but not enabled: low/full-speed device — needs the UHCI companion controller\n")
+		b.WriteString("  => reset pulsed but port never enabled: HS chirp failed (PHY HS tuning) or a full/low-speed device needing the UHCI companion\n")
 	}
 }
 
