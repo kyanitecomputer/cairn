@@ -593,6 +593,10 @@ func ehciState(b *strings.Builder, c *ehci.Controller, port ehci.Port) {
 			s.PHYCtlSts2, s.PHYCtlSts2&(0x3<<26) == (0x3<<26),
 			s.PHYCtlSts3, s.PHYCtlSts3&(0x3<<21) == (0x2<<21))
 	}
+	if s.HasVHub {
+		fmt.Fprintf(b, "  vhubd CTRL  = %#010x   phy_clocked=%v (PHY_CLK+PHY_RESET_DIS)\n",
+			s.VHubCtrl, s.PHYClocked())
+	}
 	if s.CapLength == 0xff {
 		b.WriteString("  !! CAPLENGTH reads 0xff: controller not clocked or not mapped\n")
 	}
@@ -640,6 +644,7 @@ func ehciSummary(b *strings.Builder, s ehci.Status, port ehci.Port, stepFails in
 	warn(mux != "host", "port not routed to the EHCI host: device will not appear")
 	warn(s.CapLength == 0xff, "controller unreachable (CAPLENGTH 0xff): core unclocked or PHY down")
 	warn(!s.Configured(), "CONFIGFLAG not set: ports not handed to EHCI")
+	warn(s.HasVHub && !s.PHYClocked(), "USB2 PHY not clocked (vhubd CTRL PHY_CLK/PHY_RESET_DIS): port cannot sense a device")
 
 	switch {
 	case s.CapLength == 0 || s.CapLength == 0xff:
