@@ -527,10 +527,9 @@ func ehciCmd() console.Command {
 
 				if connected {
 					b.WriteString("\n--- device present: driving root-port reset ---\n")
-					before, after := c.ResetPort()
-					fmt.Fprintf(&b, "  PORTSC %#010x -> %#010x\n", before, after)
+					r := c.ResetPort()
+					ehciResetResult(&b, r)
 					st = c.Status()
-					fmt.Fprintf(&b, "  speed after reset: %s\n", st.Speed())
 				}
 
 				b.WriteString("\n--- summary ---\n")
@@ -546,9 +545,8 @@ func ehciCmd() console.Command {
 					b.WriteString("no device connected — nothing to reset\n")
 					return b.String(), nil
 				}
-				before, after := c.ResetPort()
-				fmt.Fprintf(&b, "root-port reset PORTSC %#010x -> %#010x, speed=%s\n",
-					before, after, c.Status().Speed())
+				r := c.ResetPort()
+				ehciResetResult(&b, r)
 				return b.String(), nil
 
 			default:
@@ -599,6 +597,27 @@ func ehciState(b *strings.Builder, c *ehci.Controller, port ehci.Port) {
 	}
 	if s.CapLength == 0xff {
 		b.WriteString("  !! CAPLENGTH reads 0xff: controller not clocked or not mapped\n")
+	}
+}
+
+// ehciResetResult prints the root-port reset trajectory: the before value, the
+// sampled PORTSC across the settle window (so a high-speed device transiently
+// reading as disconnected during the chirp handshake is visible), and the final
+// enabled/speed verdict.
+func ehciResetResult(b *strings.Builder, r ehci.ResetResult) {
+	fmt.Fprintf(b, "  before      = %#010x %s\n", r.Before, names2(ehci.DecodePortSC(r.Before)))
+	for i, s := range r.Samples {
+		fmt.Fprintf(b, "  sample %-2d   = %#010x %s\n", i, s, names2(ehci.DecodePortSC(s)))
+	}
+	fmt.Fprintf(b, "  after       = %#010x (attempts=%d) enabled=%v speed=%s\n",
+		r.After, r.Attempts, r.Enabled, r.Speed)
+	switch {
+	case r.Enabled:
+		fmt.Fprintf(b, "  => port ENABLED at %s — ready to enumerate\n", r.Speed)
+	case r.After&(1<<0) == 0:
+		b.WriteString("  => device dropped off during reset (no connect): signal/PHY or a full-speed device that needs the companion\n")
+	default:
+		b.WriteString("  => still connected but not enabled: low/full-speed device — needs the UHCI companion controller\n")
 	}
 }
 
