@@ -18,10 +18,10 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/kyanitecomputer/aspeed-go/hal/an8801r"
-	"github.com/kyanitecomputer/aspeed-go/hal/ast2700net"
-	"github.com/kyanitecomputer/aspeed-go/hal/ftgmac100"
-	"github.com/kyanitecomputer/aspeed-go/hal/mdio"
+	"src.kyanite.computer/aspeed-go/hal/an8801r"
+	"src.kyanite.computer/aspeed-go/hal/ast2700net"
+	"src.kyanite.computer/aspeed-go/hal/ftgmac100"
+	"src.kyanite.computer/aspeed-go/hal/mdio"
 	"github.com/usbarmory/tamago/soc/aspeed/ast2700"
 )
 

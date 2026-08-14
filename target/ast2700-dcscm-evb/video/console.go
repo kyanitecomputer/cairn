@@ -8,7 +8,7 @@ package video
 import (
 	_ "unsafe"
 
-	"github.com/kyanitecomputer/aspeed-go/hal/framebuffer"
+	"src.kyanite.computer/aspeed-go/hal/framebuffer"
 	"github.com/usbarmory/tamago/soc/aspeed/ast2700"
 )
 

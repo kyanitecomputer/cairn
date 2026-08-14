@@ -13,8 +13,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/kyanitecomputer/aspeed-go/hal/ftgmac100"
-	"github.com/kyanitecomputer/aspeed-go/reg"
+	"src.kyanite.computer/aspeed-go/hal/ftgmac100"
+	"src.kyanite.computer/aspeed-go/reg"
 )
 
 func diagnose(nic *ftgmac100.Device) {

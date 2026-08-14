@@ -19,9 +19,9 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/kyanitecomputer/aspeed-go/hal/aspeedgfx"
-	"github.com/kyanitecomputer/aspeed-go/hal/edid"
-	"github.com/kyanitecomputer/aspeed-go/hal/framebuffer"
+	"src.kyanite.computer/aspeed-go/hal/aspeedgfx"
+	"src.kyanite.computer/aspeed-go/hal/edid"
+	"src.kyanite.computer/aspeed-go/hal/framebuffer"
 	"github.com/usbarmory/tamago/soc/aspeed/ast2700"
 
 	"src.kyanite.computer/core/console"

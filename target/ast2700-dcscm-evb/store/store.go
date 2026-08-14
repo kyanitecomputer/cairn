@@ -20,8 +20,8 @@ import (
 	"log/slog"
 	"sync"
 
-	"github.com/kyanitecomputer/aspeed-go/hal/spi"
-	"github.com/kyanitecomputer/aspeed-go/hal/spinor"
+	"src.kyanite.computer/aspeed-go/hal/spi"
+	"src.kyanite.computer/aspeed-go/hal/spinor"
 	"src.kyanite.computer/core/cfgstore"
 	"src.kyanite.computer/scree"
 	"src.kyanite.computer/scree/blkdev"

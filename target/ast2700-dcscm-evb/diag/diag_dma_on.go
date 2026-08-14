@@ -16,7 +16,7 @@ package diag
 import (
 	"unsafe"
 
-	"github.com/kyanitecomputer/aspeed-go/reg"
+	"src.kyanite.computer/aspeed-go/reg"
 	"github.com/usbarmory/tamago/soc/aspeed/ast2700"
 )
 

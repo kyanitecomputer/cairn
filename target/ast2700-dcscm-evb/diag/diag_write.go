@@ -13,7 +13,7 @@
 
 package diag
 
-import "github.com/kyanitecomputer/aspeed-go/reg"
+import "src.kyanite.computer/aspeed-go/reg"
 
 const (
 	scratchOff = 0x03F0_0000 // 63 MiB — above the boot image, within the 64 MiB chip

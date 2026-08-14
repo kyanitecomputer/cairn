@@ -5,6 +5,6 @@
 
 package net
 
-import "github.com/kyanitecomputer/aspeed-go/hal/ftgmac100"
+import "src.kyanite.computer/aspeed-go/hal/ftgmac100"
 
 func diagnose(*ftgmac100.Device) {}

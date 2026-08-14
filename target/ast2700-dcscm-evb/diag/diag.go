@@ -31,8 +31,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/kyanitecomputer/aspeed-go/hal/spi"
-	"github.com/kyanitecomputer/aspeed-go/reg"
+	"src.kyanite.computer/aspeed-go/hal/spi"
+	"src.kyanite.computer/aspeed-go/reg"
 )
 
 // AST2700 FMC controller register base and memory-mapped flash window, as seen

@@ -21,8 +21,8 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/kyanitecomputer/aspeed-go/hal/usb/ehci"
-	"github.com/kyanitecomputer/aspeed-go/hal/usb/vhub"
+	"src.kyanite.computer/aspeed-go/hal/usb/ehci"
+	"src.kyanite.computer/aspeed-go/hal/usb/vhub"
 	tboard "github.com/usbarmory/tamago/board/aspeed/ast2700dcscm"
 	"src.kyanite.computer/core/cfgstore"
 	"src.kyanite.computer/core/console"
