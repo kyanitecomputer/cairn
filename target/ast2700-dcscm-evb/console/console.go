@@ -481,7 +481,7 @@ func ehciCmd() console.Command {
 		Complete: func(prev []string, _ string) []string {
 			switch len(prev) {
 			case 0:
-				return []string{"status", "diag", "reset"}
+				return []string{"status", "diag", "reset", "enum"}
 			case 1:
 				return []string{"d"}
 			}
@@ -489,7 +489,7 @@ func ehciCmd() console.Command {
 		},
 		Run: func(args []string) (string, error) {
 			if len(args) < 1 {
-				return "usage: ehci status|diag|reset [d]", nil
+				return "usage: ehci status|diag|reset|enum [d]", nil
 			}
 			port := ehci.EHCI3PortD
 			if len(args) >= 2 && args[1] != "d" {
@@ -549,8 +549,13 @@ func ehciCmd() console.Command {
 				ehciResetResult(&b, r)
 				return b.String(), nil
 
+			case "enum":
+				var b strings.Builder
+				ehciEnum(&b, c, port)
+				return b.String(), nil
+
 			default:
-				return "usage: ehci status|diag|reset [d]", nil
+				return "usage: ehci status|diag|reset|enum [d]", nil
 			}
 		},
 	}
@@ -626,6 +631,66 @@ func ehciResetResult(b *strings.Builder, r ehci.ResetResult) {
 	default:
 		b.WriteString("  => reset pulsed but port never enabled: HS chirp failed (PHY HS tuning) or a full/low-speed device needing the UHCI companion\n")
 	}
+}
+
+// ehciEnum brings the host controller up, resets/enables the root port and, if
+// a high-speed device is present, performs the first control transfer of USB
+// enumeration: GET_DESCRIPTOR(DEVICE) for the first 8 bytes, which reveals the
+// descriptor length/type and EP0 max packet size. This is the first real DMA
+// data transfer over the async schedule.
+func ehciEnum(b *strings.Builder, c *ehci.Controller, port ehci.Port) {
+	steps := c.InitSteps()
+	if fails := countEhciFails(steps); fails > 0 {
+		fmt.Fprintf(b, "bring-up: %d step(s) failed — run `ehci diag` for detail\n", fails)
+		return
+	}
+	fmt.Fprintln(b, "bring-up: ok")
+
+	portsc, connected, waited := c.PollConnect(5 * time.Second)
+	fmt.Fprintf(b, "port: connected=%v after %v (PORTSC %#010x)\n", connected, waited.Round(time.Millisecond), portsc)
+	if !connected {
+		b.WriteString("no device present — plug a USB2 device into the card's port\n")
+		return
+	}
+
+	r := c.ResetPort()
+	st := c.Status()
+	fmt.Fprintf(b, "reset: enabled=%v speed=%s\n", r.Enabled, st.Speed())
+	if !r.Enabled {
+		b.WriteString("port not enabled at high speed — low/full-speed devices need the UHCI companion (not yet implemented)\n")
+		return
+	}
+
+	c.SetDMA(newEHCIDMA())
+
+	// First enumeration step: read the device descriptor header at the default
+	// address 0 with the minimum EP0 packet size (8).
+	desc, err := c.GetDeviceDescriptor(0, 8, 8)
+	if err != nil {
+		fmt.Fprintf(b, "GET_DESCRIPTOR(DEVICE,8) failed: %v\n", err)
+		return
+	}
+	fmt.Fprintf(b, "GET_DESCRIPTOR(DEVICE,8): % x\n", desc)
+	if len(desc) >= 8 && desc[1] == 1 {
+		bcd := uint16(desc[2]) | uint16(desc[3])<<8
+		fmt.Fprintf(b, "  bLength=%d bDescriptorType=%d bcdUSB=%x.%02x\n", desc[0], desc[1], bcd>>8, bcd&0xff)
+		fmt.Fprintf(b, "  bDeviceClass=%#02x subclass=%#02x proto=%#02x bMaxPacketSize0=%d\n",
+			desc[4], desc[5], desc[6], desc[7])
+		b.WriteString("  => enumeration control transfer WORKS (valid device descriptor over EHCI DMA)\n")
+	} else {
+		b.WriteString("  => unexpected descriptor header (type should be 1)\n")
+	}
+}
+
+// countEhciFails returns the number of bring-up steps that failed verification.
+func countEhciFails(steps []ehci.Step) int {
+	n := 0
+	for _, s := range steps {
+		if s.Checked() && !s.OK() {
+			n++
+		}
+	}
+	return n
 }
 
 // ehciSteps prints each bring-up step with a pass/fail marker and before->after
