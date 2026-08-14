@@ -668,6 +668,14 @@ func ehciEnum(b *strings.Builder, c *ehci.Controller, port ehci.Port) {
 	desc, err := c.GetDeviceDescriptor(0, 8, 8)
 	if err != nil {
 		fmt.Fprintf(b, "GET_DESCRIPTOR(DEVICE,8) failed: %v\n", err)
+		d := c.Debug()
+		fmt.Fprintf(b, "  HCCPARAMS = %#010x  addr64=%v\n", d.HCCParams, d.Addr64())
+		fmt.Fprintf(b, "  USBCMD    = %#010x  USBSTS=%#010x async_running=%v\n", d.USBCmd, d.USBSts, d.AsyncRunning())
+		fmt.Fprintf(b, "  CTRLDSSEG = %#010x  ASYNCADDR=%#010x  QHphys=%#012x\n", d.CtrlDSSeg, d.AsyncAddr, d.QHPhys)
+		fmt.Fprintf(b, "  QH: curQTD=%#010x overlayTok=%#010x\n", d.QHCurQTD, d.QHToken)
+		fmt.Fprintf(b, "  qTD tokens: setup=%#010x data=%#010x status=%#010x\n", d.SetupTok, d.DataTok, d.StatusTok)
+		fmt.Fprintf(b, "  PORTSC    = %#010x\n", d.PortSC)
+		b.WriteString("  (token bit7=Active, bit6=Halted; if all still Active the HC never executed the QH)\n")
 		return
 	}
 	fmt.Fprintf(b, "GET_DESCRIPTOR(DEVICE,8): % x\n", desc)
