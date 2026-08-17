@@ -5,6 +5,8 @@ a bare-metal BMC OS built with the [TamaGo](https://github.com/usbarmory/tamago)
 framework: pure Go, no OS, no libc, no CGo. It shares the microkernel substrate
 (`src.kyanite.computer/core`) with [vein](../vein), the Kyanite switch OS.
 
+> **Status:** experimental — expect breaking changes.
+
 This is early scaffolding: the first target is a structural stub that establishes
 the layering and patterns. It performs no hardware management yet — sensor,
 power and inventory drivers land during hardware enablement.
@@ -79,3 +81,17 @@ src.kyanite.computer/cairn
 ```
 
 No CGo, no external C libraries. Compiles with `GOOS=tamago GOARCH=arm64`.
+
+## Contributing
+
+See the org-wide [CONTRIBUTING guide](https://github.com/kyanitecomputer/.github/blob/main/CONTRIBUTING.md).
+Contributions are dual-licensed.
+
+## Security
+
+See the org-wide [SECURITY policy](https://github.com/kyanitecomputer/.github/blob/main/SECURITY.md).
+
+## License
+
+Dual-licensed under either of Apache-2.0 ([LICENSE-APACHE](LICENSE-APACHE)) or
+MIT ([LICENSE-MIT](LICENSE-MIT)) at your option.
