@@ -52,7 +52,7 @@ else
 	PAYLOAD_ELF="$CAIRN/bin/cairn.elf"
 fi
 
-TAMAGO="${TAMAGO:-/home/mdr164/private/tamago/tamago-go/bin/go}"
+TAMAGO="${TAMAGO:-tamago}"
 CPTRA_IMGTOOL="${CPTRA_IMGTOOL:-$CAIRN/../cptra_imgtool}"
 PREBUILT="${PREBUILT:?set PREBUILT to a dir with caliptra-fw/mcu-runtime/prebuilts}"
 # ast2700-default supplies the ECC+LMS dev keys; MLDSA_KEYDIR supplies the MLDSA

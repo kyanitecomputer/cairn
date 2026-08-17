@@ -16,9 +16,9 @@
 # ---------------------------------------------------------------------------
 # Toolchain
 # ---------------------------------------------------------------------------
-TAMAGO ?= /home/mdr164/private/tamago/tamago-go/bin/go
-ifeq ($(wildcard $(TAMAGO)),)
-$(error TamaGo compiler not found at $(TAMAGO). Set TAMAGO environment variable)
+TAMAGO ?= tamago
+ifeq ($(shell command -v $(TAMAGO) 2>/dev/null),)
+$(error TamaGo compiler '$(TAMAGO)' not found. Set the TAMAGO environment variable to your tamago-go binary)
 endif
 
 READELF ?= llvm-readelf
