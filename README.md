@@ -3,7 +3,7 @@
 Cairn is the Kyanite baseboard management controller (BMC) software stack. It is
 a bare-metal BMC OS built with the [TamaGo](https://github.com/usbarmory/tamago)
 framework: pure Go, no OS, no libc, no CGo. It shares the microkernel substrate
-(`src.kyanite.computer/core`) with [vein](../vein), the Kyanite switch OS.
+(`src.kyanite.computer/core`) with [vein](https://github.com/kyanitecomputer/vein), the Kyanite switch OS.
 
 > **Status:** experimental — expect breaking changes.
 
