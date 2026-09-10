@@ -135,12 +135,33 @@ for f in caliptra-fw.bin \
 	cp "$PREBUILT/$f" "$STAGE/$f"
 done
 
-# The MCU runtime (BootMCU FMC, FLSH id 3). Defaults to the vendor binary; set
-# MCU_RUNTIME_BIN to our own aspeed-mcu-runtime FMC (built for A2, linked at
-# 0x14B80000) to run the cairn Rust BootMCU instead of vendor Zephyr.
-MCU_RUNTIME_BIN="${MCU_RUNTIME_BIN:-$PREBUILT/ast2700-mcu-runtime.bin}"
-cp "$MCU_RUNTIME_BIN" "$STAGE/ast2700-mcu-runtime.bin"
-echo "    MCU runtime: $MCU_RUNTIME_BIN"
+# The MCU runtime (BootMCU FMC, FLSH id 3). By default we build our own
+# aspeed-mcu-runtime Rust BootMCU for A2 from source. A2 links the FMC at GSRAM
+# base 0x14B80000 (the A2 ROM loads it there, with no ASTH header); the A1
+# default links at 0x14B80A00 and faults the instant the A2 ROM jumps to it —
+# the firmware loads (Ff=0000) and is entered (J=0000) but every absolute
+# address is off by 0xA00, so nothing prints. embassy-aspeed's build.rs selects
+# the A2 layout (link/ast2700-bootmcu-a2.x) when AST2700_BOOTMCU_A2 is set.
+#
+# Set MCU_RUNTIME_BIN to override with a prebuilt binary (e.g. vendor Zephyr, or
+# a pre-built FMC); set MCU_RUNTIME_SRC to point at a different aspeed-mcu-runtime
+# checkout.
+MCU_RUNTIME_SRC="${MCU_RUNTIME_SRC:-$CAIRN/../aspeed-mcu-runtime}"
+if [ -n "${MCU_RUNTIME_BIN:-}" ]; then
+	echo "    MCU runtime (prebuilt): $MCU_RUNTIME_BIN"
+	cp "$MCU_RUNTIME_BIN" "$STAGE/ast2700-mcu-runtime.bin"
+elif [ -d "$MCU_RUNTIME_SRC/app-rot" ]; then
+	echo "    MCU runtime: building Rust BootMCU (A2, linked 0x14B80000) from $MCU_RUNTIME_SRC"
+	MCU_ELF="$MCU_RUNTIME_SRC/app-rot/target/riscv32imc-unknown-none-elf/release/rot_ast2700_bootmcu"
+	( cd "$MCU_RUNTIME_SRC/app-rot" && AST2700_BOOTMCU_A2=1 cargo build --release \
+		--target riscv32imc-unknown-none-elf --bin rot_ast2700_bootmcu \
+		--no-default-features --features ast2700-bootmcu -Z build-std=core )
+	llvm-objcopy -O binary "$MCU_ELF" "$STAGE/ast2700-mcu-runtime.bin"
+else
+	echo "ERROR: no MCU runtime: set MCU_RUNTIME_BIN to a prebuilt FMC, or" >&2
+	echo "       MCU_RUNTIME_SRC to an aspeed-mcu-runtime checkout to build ours." >&2
+	exit 1
+fi
 
 if [ ! -x "$MANIFEST_TOOL" ]; then
 	echo "    manifest binary not prebuilt; will use 'cargo run' (may sync rustup)"

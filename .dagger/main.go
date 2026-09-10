@@ -21,7 +21,7 @@
 //
 // Usage (from the cairn repo root). Common inputs:
 //
-//	CORE="--tamago ../tamago --tamago-go ../../tamago/tamago-go --core ../core --scree ../scree --nats-server ../nats-server --aspeed-go ../aspeed-go --lneto ../lneto"
+//	CORE="--tamago ../tamago --tamago-go ../../tamago/tamago-go --core ../core --scree ../scree --nats-server ../nats-server --aspeed-go ../aspeed-go --lneto ../lneto --schema ../schema"
 //
 //	dagger call build $CORE
 //	dagger call test  $CORE
@@ -29,7 +29,11 @@
 //	dagger call image $CORE \
 //	    --aspeed-mcu-runtime ../aspeed-mcu-runtime --aspeed-rs ../aspeed-rs \
 //	    --aspeed-data ../aspeed-data --bmc-pb ../bmc-pb \
-//	    --silicon a2 export --path ./out
+//	    --silicon a1 export --path ./out
+//
+// The AST2700-A2 image (FLSH container + signed ATMN SoC manifest) is built by
+// tools/a2/gen-a2-image.sh, not by this dagger function — see that script and
+// the A1-ONLY note on Image below.
 package main
 
 import (
@@ -81,14 +85,16 @@ func (m *Cairn) base(
 	natsServer *dagger.Directory,
 	aspeedGo *dagger.Directory,
 	lneto *dagger.Directory,
+	schema *dagger.Directory,
 ) *dagger.Container {
 	goCache := dag.CacheVolume("cairn-go-mod")
 	goBuild := dag.CacheVolume("cairn-go-build")
 
 	// In-container workspace: cairn + the shared core module + the tamago fork
 	// (AST2700 support) + scree + nats-server + aspeed-go (FTGMAC/SPI HAL) +
-	// lneto (userspace TCP/IP).
-	goWork := "go 1.27\n\nuse (\n\t./cairn\n\t./core\n\t./tamago\n\t./scree\n\t./nats-server\n\t./aspeed-go\n\t./lneto\n)\n"
+	// lneto (userspace TCP/IP) + schema/gen/go (generated protobuf module,
+	// vanity import src.kyanite.computer/schema/gen/go).
+	goWork := "go 1.27\n\nuse (\n\t./cairn\n\t./core\n\t./tamago\n\t./scree\n\t./nats-server\n\t./aspeed-go\n\t./lneto\n\t./schema/gen/go\n)\n"
 
 	return dag.Container().
 		From(stagexPallet).
@@ -102,6 +108,7 @@ func (m *Cairn) base(
 		WithDirectory("/build/nats-server", natsServer).
 		WithDirectory("/build/aspeed-go", aspeedGo).
 		WithDirectory("/build/lneto", lneto).
+		WithDirectory("/build/schema", schema).
 		WithNewFile("/build/go.work", goWork).
 		WithEnvVariable("GOWORK", "/build/go.work").
 		WithEnvVariable("GOTOOLCHAIN", "local").
@@ -113,8 +120,8 @@ func (m *Cairn) base(
 }
 
 // elf cross-compiles the AST2700 DC-SCM EVB ELF into /out/cairn.elf.
-func (m *Cairn) elf(src, tamago, tamagoGo, core, scree, natsServer, aspeedGo, lneto *dagger.Directory) *dagger.Container {
-	return m.base(src, tamago, tamagoGo, core, scree, natsServer, aspeedGo, lneto).
+func (m *Cairn) elf(src, tamago, tamagoGo, core, scree, natsServer, aspeedGo, lneto, schema *dagger.Directory) *dagger.Container {
+	return m.base(src, tamago, tamagoGo, core, scree, natsServer, aspeedGo, lneto, schema).
 		WithExec([]string{"mkdir", "-p", "/out"}).
 		WithExec([]string{
 			"go", "build", "-trimpath",
@@ -136,8 +143,9 @@ func (m *Cairn) Build(
 	natsServer *dagger.Directory,
 	aspeedGo *dagger.Directory,
 	lneto *dagger.Directory,
+	schema *dagger.Directory,
 ) *dagger.File {
-	return m.elf(src, tamago, tamagoGo, core, scree, natsServer, aspeedGo, lneto).File("/out/cairn.elf")
+	return m.elf(src, tamago, tamagoGo, core, scree, natsServer, aspeedGo, lneto, schema).File("/out/cairn.elf")
 }
 
 // Test runs the host unit tests (Linux userspace, user_linux build tag).
@@ -152,8 +160,9 @@ func (m *Cairn) Test(
 	natsServer *dagger.Directory,
 	aspeedGo *dagger.Directory,
 	lneto *dagger.Directory,
+	schema *dagger.Directory,
 ) (string, error) {
-	return m.base(src, tamago, tamagoGo, core, scree, natsServer, aspeedGo, lneto).
+	return m.base(src, tamago, tamagoGo, core, scree, natsServer, aspeedGo, lneto, schema).
 		WithEnvVariable("GOOS", "linux").
 		WithEnvVariable("GOARCH", "amd64").
 		WithExec([]string{"go", "test", "-tags", "user_linux", "./..."}).
@@ -165,9 +174,9 @@ func (m *Cairn) Test(
 // AST2700 SPI flash image except the BootMCU firmware, which is either provided
 // as a prebuilt (see Image's bootMcuFmc) or built from Rust by bootMCU below.
 func (m *Cairn) imageContainer(
-	src, tamago, tamagoGo, core, scree, natsServer, aspeedGo, lneto, bmcPb *dagger.Directory,
+	src, tamago, tamagoGo, core, scree, natsServer, aspeedGo, lneto, schema, bmcPb *dagger.Directory,
 ) *dagger.Container {
-	return m.base(src, tamago, tamagoGo, core, scree, natsServer, aspeedGo, lneto).
+	return m.base(src, tamago, tamagoGo, core, scree, natsServer, aspeedGo, lneto, schema).
 		WithDirectory("/build/bmc-pb", bmcPb).
 		WithExec([]string{"mkdir", "-p", "/out"}).
 		// Build the imgtools stitcher as a host (linux/amd64) binary — it runs
@@ -229,7 +238,7 @@ func (m *Cairn) bootMCU(ctr *dagger.Container, firmware *dagger.File) *dagger.Co
 
 // Image builds the cairn CA35 payload (TamaGo) and stitches it, the BootMCU
 // firmware, and the bmc-pb prebuilts (Caliptra, DDR training, DP FW) into a
-// complete AST2700 SPI flash image using imgtools.
+// complete AST2700-A1 SPI flash image (ASTH secure-boot header) using imgtools.
 //
 // The BootMCU firmware is either supplied prebuilt via bootMcuFmc (skips the
 // Rust build — useful where the StageX Rust image is unavailable) or built from
@@ -237,10 +246,16 @@ func (m *Cairn) bootMCU(ctr *dagger.Container, firmware *dagger.File) *dagger.Co
 // aspeedData and a musl-compatible StageX rustImage; core is built via
 // -Zbuild-std, so no prebuilt riscv32 std is needed).
 //
-// silicon selects the bmc-pb subdirectory (a1 → ast2700a1, a2 → ast2700a2). The
-// BootMCU detects the silicon revision at runtime, so a single firmware serves
-// both; silicon only selects the DRAM-training/Caliptra/DP prebuilt set.
-// buildTags overrides the payload build tags for board/silicon variants.
+// A1 ONLY. The A2 image is NOT a drop-in re-stitch: A2 replaces the ASTH header
+// with a Caliptra "FLSH" container carrying a signed ATMN SoC auth-manifest, and
+// the BootMCU FMC must be linked at GSRAM base 0x14B80000 (A1 links at
+// 0x14B80A00 and faults the instant the A2 ROM enters it). The manifest is
+// signed by the vendor cptra_imgtool over the exact FMC+payload bytes, which is
+// not reproducible in-container, so A2 is produced by tools/a2/gen-a2-image.sh
+// (which builds the A2 FMC, generates+signs the manifest and stitches FLSH).
+//
+// silicon selects the bmc-pb subdirectory; buildTags overrides the payload build
+// tags for board variants.
 func (m *Cairn) Image(
 	ctx context.Context,
 	// +defaultPath="."
@@ -252,6 +267,7 @@ func (m *Cairn) Image(
 	natsServer *dagger.Directory,
 	aspeedGo *dagger.Directory,
 	lneto *dagger.Directory,
+	schema *dagger.Directory,
 	bmcPb *dagger.Directory,
 	// +optional
 	bootMcuFmc *dagger.File,
@@ -278,6 +294,12 @@ func (m *Cairn) Image(
 	if silicon == "" {
 		silicon = "a1"
 	}
+	if silicon == "a2" {
+		return nil, fmt.Errorf("image: --silicon a2 is not built here — the A2 FLSH image needs a vendor-signed ATMN SoC manifest (cptra_imgtool, not reproducible in-container) and the BootMCU FMC linked for A2 (0x14B80000). Use tools/a2/gen-a2-image.sh, which builds the A2 FMC, generates and signs the manifest, and stitches the FLSH container")
+	}
+	if silicon != "a1" {
+		return nil, fmt.Errorf("image: unsupported silicon %q (want a1; for a2 use tools/a2/gen-a2-image.sh)", silicon)
+	}
 	if imageSize == "" {
 		imageSize = "32M"
 	}
@@ -289,7 +311,7 @@ func (m *Cairn) Image(
 	}
 	pb := "/build/bmc-pb/ast2700" + silicon
 
-	ctr := m.imageContainer(src, tamago, tamagoGo, core, scree, natsServer, aspeedGo, lneto, bmcPb)
+	ctr := m.imageContainer(src, tamago, tamagoGo, core, scree, natsServer, aspeedGo, lneto, schema, bmcPb)
 
 	// BootMCU firmware: use the prebuilt FMC when provided, else build from Rust.
 	if bootMcuFmc != nil {
@@ -345,11 +367,12 @@ func (m *Cairn) Ci(
 	natsServer *dagger.Directory,
 	aspeedGo *dagger.Directory,
 	lneto *dagger.Directory,
+	schema *dagger.Directory,
 ) (string, error) {
-	if _, err := m.elf(src, tamago, tamagoGo, core, scree, natsServer, aspeedGo, lneto).Sync(ctx); err != nil {
+	if _, err := m.elf(src, tamago, tamagoGo, core, scree, natsServer, aspeedGo, lneto, schema).Sync(ctx); err != nil {
 		return "", fmt.Errorf("build: %w", err)
 	}
-	if _, err := m.Test(ctx, src, tamago, tamagoGo, core, scree, natsServer, aspeedGo, lneto); err != nil {
+	if _, err := m.Test(ctx, src, tamago, tamagoGo, core, scree, natsServer, aspeedGo, lneto, schema); err != nil {
 		return "", fmt.Errorf("test: %w", err)
 	}
 	return "build: ok\ntest: ok", nil
