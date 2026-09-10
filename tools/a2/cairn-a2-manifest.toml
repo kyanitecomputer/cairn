@@ -59,8 +59,9 @@ mldsa_priv_key = "own-man-mldsa-priv-key.bin"
 
 [image_runtime_list]
 caliptra_file = "caliptra-fw.bin"
-# MCU runtime (BootMCU FMC): the vendor A2 binary today; replace with our own
-# aspeed-mcu-runtime A2 build once ported.
+# MCU runtime (BootMCU FMC): our aspeed-mcu-runtime Rust BootMCU, built for A2
+# (linked at 0x14B80000) by gen-a2-image.sh. Override with MCU_RUNTIME_BIN to
+# use a prebuilt binary (e.g. vendor Zephyr).
 mcu_file = "ast2700-mcu-runtime.bin"
 
 # --- MCU runtime (FMC) ---
