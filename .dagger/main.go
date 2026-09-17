@@ -9,25 +9,32 @@
 //
 // The AST2700 boots via its BootMCU (RISC-V RV32), which prepares DRAM and loads
 // the CA35 payload. The `image` function builds that BootMCU firmware from the
-// aspeed-mcu-runtime Rust sources, builds the cairn CA35 payload, and stitches a
+// mcu-runtime Rust sources, builds the cairn CA35 payload, and stitches a
 // complete SPI flash image with imgtools (in tools/imgtools) using the bmc-pb
 // prebuilts (Caliptra, DDR training, DP FW) for the selected silicon revision.
-// The image-stitching logic lives here in cairn; aspeed-mcu-runtime is consumed
+// The image-stitching logic lives here in cairn; mcu-runtime is consumed
 // only as the Rust runtime source.
 //
 // NOTE: the generated Dagger SDK glue (dagger.gen.go, internal/dagger) is not
 // committed; run `dagger develop` once to regenerate it before invoking these
 // functions.
 //
-// Usage (from the cairn repo root). Common inputs:
+// Most users should drive both silicon revisions through the uniform Makefile
+// entrypoint, which fills in the sibling-checkout paths and normalizes the
+// output layout:
 //
-//	CORE="--tamago ../tamago --tamago-go ../../tamago/tamago-go --core ../core --scree ../scree --nats-server ../nats-server --aspeed-go ../aspeed-go --lneto ../lneto --schema ../schema"
+//	make image SILICON=a1    # this dagger function (reproducible, in-container)
+//	make image SILICON=a2    # tools/a2/gen-a2-image.sh (host vendor signer)
+//
+// Usage of the raw dagger calls (from the cairn repo root). Common inputs:
+//
+//	CORE="--tamago ../tamago --tamago-go ../tamago-go --core ../core --scree ../scree --nats-server ../nats-server --aspeed-go ../aspeed-go --lneto ../lneto --schema ../schema"
 //
 //	dagger call build $CORE
 //	dagger call test  $CORE
 //	dagger call ci    $CORE
 //	dagger call image $CORE \
-//	    --aspeed-mcu-runtime ../aspeed-mcu-runtime --aspeed-rs ../aspeed-rs \
+//	    --mcu-runtime ../mcu-runtime --aspeed-rs ../aspeed-rs \
 //	    --aspeed-data ../aspeed-data --bmc-pb ../bmc-pb \
 //	    --silicon a1 export --path ./out
 //
@@ -59,8 +66,8 @@ const (
 	// the CA35 secondary-init path). Override for other silicon/board variants.
 	defaultBuildTags = "linkcpuinit,ast2700dcscm"
 
-	// BootMCU (RISC-V RV32) firmware, built from the aspeed-mcu-runtime Rust
-	// sources. These match aspeed-mcu-runtime's own build parameters.
+	// BootMCU (RISC-V RV32) firmware, built from the mcu-runtime Rust
+	// sources. These match mcu-runtime's own build parameters.
 	bootmcuTarget = "riscv32imc-unknown-none-elf"
 	bootmcuBin    = "rot_ast2700_bootmcu"
 	// No portable_atomic_unsafe_assume_single_core cfg: app-rot deliberately
@@ -191,27 +198,27 @@ func (m *Cairn) imageContainer(
 		WithEnvVariable("GOARCH", "arm64")
 }
 
-// bootMCUFirmwareELF builds the BootMCU firmware ELF from the aspeed-mcu-runtime
+// bootMCUFirmwareELF builds the BootMCU firmware ELF from the mcu-runtime
 // Rust sources in the StageX Rust image (pinned/overridable via rustImage).
 // StageX ships a rustup-less toolchain with no prebuilt riscv32 std, so core is
 // built via -Zbuild-std (RUSTC_BOOTSTRAP unlocks it on the pinned stable
-// toolchain) — the same approach aspeed-mcu-runtime's own CI uses.
+// toolchain) — the same approach mcu-runtime's own CI uses.
 func (m *Cairn) bootMCUFirmwareELF(
 	rustImage string,
-	aspeedMcuRuntime, aspeedRs, aspeedData *dagger.Directory,
+	mcuRuntime, aspeedRs, aspeedData *dagger.Directory,
 ) *dagger.File {
 	cargoCache := dag.CacheVolume("cairn-cargo-registry")
-	elf := "/build/aspeed-mcu-runtime/app-rot/target/" +
+	elf := "/build/mcu-runtime/app-rot/target/" +
 		bootmcuTarget + "/release/" + bootmcuBin
 	return dag.Container().
 		From(rustImage).
 		WithEnvVariable("CARGO_HOME", "/usr/local/cargo").
 		WithEnvVariable("RUSTC_BOOTSTRAP", "1").
 		WithMountedCache("/usr/local/cargo/registry", cargoCache).
-		WithDirectory("/build/aspeed-mcu-runtime", aspeedMcuRuntime).
+		WithDirectory("/build/mcu-runtime", mcuRuntime).
 		WithDirectory("/build/aspeed-rs", aspeedRs).
 		WithDirectory("/build/aspeed-data", aspeedData).
-		WithWorkdir("/build/aspeed-mcu-runtime/app-rot").
+		WithWorkdir("/build/mcu-runtime/app-rot").
 		WithEnvVariable("RUSTFLAGS", bootmcuFlags).
 		WithExec([]string{"cargo", "build",
 			"--target", bootmcuTarget,
@@ -242,7 +249,7 @@ func (m *Cairn) bootMCU(ctr *dagger.Container, firmware *dagger.File) *dagger.Co
 //
 // The BootMCU firmware is either supplied prebuilt via bootMcuFmc (skips the
 // Rust build — useful where the StageX Rust image is unavailable) or built from
-// the aspeed-mcu-runtime Rust sources (requires aspeedMcuRuntime/aspeedRs/
+// the mcu-runtime Rust sources (requires mcuRuntime/aspeedRs/
 // aspeedData and a musl-compatible StageX rustImage; core is built via
 // -Zbuild-std, so no prebuilt riscv32 std is needed).
 //
@@ -272,7 +279,7 @@ func (m *Cairn) Image(
 	// +optional
 	bootMcuFmc *dagger.File,
 	// +optional
-	aspeedMcuRuntime *dagger.Directory,
+	mcuRuntime *dagger.Directory,
 	// +optional
 	aspeedRs *dagger.Directory,
 	// +optional
@@ -283,7 +290,7 @@ func (m *Cairn) Image(
 	silicon string,
 	// +default="32M"
 	imageSize string,
-	// +default="cairn_ast2700.bin"
+	// +default="cairn_ast2700_a1.bin"
 	outputName string,
 	// +default=""
 	buildTags string,
@@ -304,7 +311,7 @@ func (m *Cairn) Image(
 		imageSize = "32M"
 	}
 	if outputName == "" {
-		outputName = "cairn_ast2700.bin"
+		outputName = "cairn_ast2700_a1.bin"
 	}
 	if buildTags == "" {
 		buildTags = defaultBuildTags
@@ -317,10 +324,10 @@ func (m *Cairn) Image(
 	if bootMcuFmc != nil {
 		ctr = ctr.WithFile("/out/rot_ast2700_bootmcu.fmc.bin", bootMcuFmc)
 	} else {
-		if aspeedMcuRuntime == nil || aspeedRs == nil || aspeedData == nil {
-			return nil, fmt.Errorf("image: building the BootMCU needs --aspeed-mcu-runtime, --aspeed-rs and --aspeed-data (or supply --boot-mcu-fmc)")
+		if mcuRuntime == nil || aspeedRs == nil || aspeedData == nil {
+			return nil, fmt.Errorf("image: building the BootMCU needs --mcu-runtime, --aspeed-rs and --aspeed-data (or supply --boot-mcu-fmc)")
 		}
-		firmware := m.bootMCUFirmwareELF(rustImage, aspeedMcuRuntime, aspeedRs, aspeedData)
+		firmware := m.bootMCUFirmwareELF(rustImage, mcuRuntime, aspeedRs, aspeedData)
 		ctr = m.bootMCU(ctr, firmware)
 	}
 

@@ -80,7 +80,7 @@ ELF     = $(BIN_DIR)/cairn.elf
 # ---------------------------------------------------------------------------
 # Targets
 # ---------------------------------------------------------------------------
-.PHONY: all clean build flashdiag flashdiag-dma test imgtools help
+.PHONY: all clean build flashdiag flashdiag-dma test imgtools image help
 
 all: build
 
@@ -137,6 +137,50 @@ imgtools: $(BIN_DIR)
 	GOWORK=off $(TAMAGO) build -C tools/imgtools -o $(abspath $(BIN_DIR))/imgtools .
 	@echo "Built: $(BIN_DIR)/imgtools"
 
+# ---------------------------------------------------------------------------
+# Full flashable SPI image — uniform entrypoint for both AST2700 steppings
+# ---------------------------------------------------------------------------
+# One command for either silicon revision; both write
+# $(IMAGE_DIR)/cairn_ast2700_<silicon>.bin:
+#
+#   make image SILICON=a1    reproducible in-container build (Dagger)
+#   make image SILICON=a2    host pipeline (vendor cptra_imgtool + FLSH stitch)
+#
+# The two revisions use different mechanisms underneath — A2 needs a
+# vendor-signed ATMN SoC manifest that is not reproducible in-container — so
+# their required inputs differ (see the variables below and
+# tools/a2/gen-a2-image.sh), but the invocation and output layout are uniform.
+SILICON   ?= a1
+IMAGE_DIR ?= out
+
+# A1 (Dagger) inputs. SIB is the parent dir holding the sibling checkouts;
+# override individual paths or BMC_PB (the non-redistributable prebuilts) as
+# needed. A2 (host script) inputs are read from the environment by
+# tools/a2/gen-a2-image.sh (PREBUILT, CPTRA_IMGTOOL, MCU_RUNTIME_SRC, ...).
+DAGGER ?= dagger
+SIB    ?= ..
+BMC_PB ?= $(SIB)/bmc-pb
+
+image:
+ifeq ($(SILICON),a1)
+	@echo "Building AST2700-A1 SPI image (Dagger, reproducible)..."
+	$(DAGGER) call image --silicon a1 \
+		--tamago $(SIB)/tamago --tamago-go $(SIB)/tamago-go \
+		--core $(SIB)/core --scree $(SIB)/scree --nats-server $(SIB)/nats-server \
+		--aspeed-go $(SIB)/aspeed-go --lneto $(SIB)/lneto --schema $(SIB)/schema \
+		--bmc-pb $(BMC_PB) \
+		--mcu-runtime $(SIB)/mcu-runtime --aspeed-rs $(SIB)/aspeed-rs \
+		--aspeed-data $(SIB)/aspeed-data \
+		--output-name cairn_ast2700_a1.bin \
+		export --path $(IMAGE_DIR)
+	@echo "Built: $(IMAGE_DIR)/cairn_ast2700_a1.bin"
+else ifeq ($(SILICON),a2)
+	@echo "Building AST2700-A2 SPI image (host pipeline, vendor signer)..."
+	OUT=$(abspath $(IMAGE_DIR)) TAMAGO=$(TAMAGO) tools/a2/gen-a2-image.sh
+else
+	$(error unknown SILICON '$(SILICON)' — use a1 or a2)
+endif
+
 clean:
 	@rm -rf $(BIN_DIR)
 	@echo "Clean complete"
@@ -151,12 +195,18 @@ help:
 	@echo "  build     Build TamaGo ELF for the AST2700 DC-SCM EVB (default)"
 	@echo "  test      Run host tests (user_linux tag)"
 	@echo "  imgtools  Build the host image-stitching tool"
+	@echo "  image     Build the full flashable SPI image (SILICON=a1|a2)"
 	@echo "  clean     Remove build artifacts"
 	@echo ""
-	@echo "Full SPI flash image (A1): dagger call image ... --silicon a1"
-	@echo "Full SPI flash image (A2): tools/a2/gen-a2-image.sh (FLSH + signed manifest)"
+	@echo "Full flash image (uniform entrypoint, writes $(IMAGE_DIR)/cairn_ast2700_<sil>.bin):"
+	@echo "  make image SILICON=a1    reproducible in-container build (Dagger)"
+	@echo "  make image SILICON=a2    host pipeline (vendor cptra_imgtool + FLSH)"
+	@echo "  A2 also needs PREBUILT / CPTRA_IMGTOOL set (see tools/a2/gen-a2-image.sh)."
 	@echo ""
 	@echo "Environment variables:"
 	@echo "  TAMAGO     Path to tamago-go binary (default: $(TAMAGO))"
 	@echo "  READELF    LLVM readelf (default: llvm-readelf)"
 	@echo "  BOARD_TAG  Board build tag (default: ast2700dcscm)"
+	@echo "  SILICON    Target stepping for 'make image' (default: a1)"
+	@echo "  SIB        Parent dir of sibling checkouts for A1 (default: ..)"
+	@echo "  BMC_PB     Prebuilts dir for A1 (default: \$$(SIB)/bmc-pb)"

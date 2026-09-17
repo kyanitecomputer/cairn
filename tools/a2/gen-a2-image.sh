@@ -136,7 +136,7 @@ for f in caliptra-fw.bin \
 done
 
 # The MCU runtime (BootMCU FMC, FLSH id 3). By default we build our own
-# aspeed-mcu-runtime Rust BootMCU for A2 from source. A2 links the FMC at GSRAM
+# mcu-runtime Rust BootMCU for A2 from source. A2 links the FMC at GSRAM
 # base 0x14B80000 (the A2 ROM loads it there, with no ASTH header); the A1
 # default links at 0x14B80A00 and faults the instant the A2 ROM jumps to it —
 # the firmware loads (Ff=0000) and is entered (J=0000) but every absolute
@@ -144,9 +144,9 @@ done
 # the A2 layout (link/ast2700-bootmcu-a2.x) when AST2700_BOOTMCU_A2 is set.
 #
 # Set MCU_RUNTIME_BIN to override with a prebuilt binary (e.g. vendor Zephyr, or
-# a pre-built FMC); set MCU_RUNTIME_SRC to point at a different aspeed-mcu-runtime
+# a pre-built FMC); set MCU_RUNTIME_SRC to point at a different mcu-runtime
 # checkout.
-MCU_RUNTIME_SRC="${MCU_RUNTIME_SRC:-$CAIRN/../aspeed-mcu-runtime}"
+MCU_RUNTIME_SRC="${MCU_RUNTIME_SRC:-$CAIRN/../mcu-runtime}"
 if [ -n "${MCU_RUNTIME_BIN:-}" ]; then
 	echo "    MCU runtime (prebuilt): $MCU_RUNTIME_BIN"
 	cp "$MCU_RUNTIME_BIN" "$STAGE/ast2700-mcu-runtime.bin"
@@ -159,7 +159,7 @@ elif [ -d "$MCU_RUNTIME_SRC/app-rot" ]; then
 	llvm-objcopy -O binary "$MCU_ELF" "$STAGE/ast2700-mcu-runtime.bin"
 else
 	echo "ERROR: no MCU runtime: set MCU_RUNTIME_BIN to a prebuilt FMC, or" >&2
-	echo "       MCU_RUNTIME_SRC to an aspeed-mcu-runtime checkout to build ours." >&2
+	echo "       MCU_RUNTIME_SRC to an mcu-runtime checkout to build ours." >&2
 	exit 1
 fi
 
