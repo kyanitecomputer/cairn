@@ -79,19 +79,30 @@ mkdir -p "$OUT" "$STAGE"
 rm -f "$OUT/$IMAGE_NAME"
 
 echo "==> 1/4 build cairn CA35 payload"
-# Forward VIDEO=1 (framebuffer console) and FACETUI=1 (embed the facet SPA).
-CAIRN_TAGS=""
-if [ -n "${FACETUI:-}" ]; then
-	CAIRN_TAGS="facetui"
-fi
+# Cross-compile the CA35 payload ELF with the host TamaGo compiler. The CA35
+# cores are Cortex-A35 (ARMv8.0-A, no FEAT_LSE), so pin GOARM64=v8.0 to keep the
+# compiler from emitting large-system atomics (which trap on this core). The
+# payload links at the CA35-view DRAM text base (0x404000000). VIDEO=1 compiles
+# in the DisplayPort framebuffer console; FACETUI=1 embeds the facet SPA.
+build_payload() {
+	( cd "$CAIRN" && GOOS=tamago GOARCH=arm64 GOARM64=v8.0 \
+	    GOOSPKG=github.com/usbarmory/tamago GOTOOLCHAIN=local \
+	    "$TAMAGO" build -trimpath -tags "$1" \
+	    -ldflags "-T 0x404000000 -R 0x1000" -o "$2" ./target/ast2700-dcscm-evb )
+}
 if [ "$DIAG" = "1" ]; then
-	DIAG_EXTRA="$CAIRN_TAGS"
-	[ "$DIAGDMA" = "1" ] && DIAG_EXTRA="${DIAG_EXTRA:+$DIAG_EXTRA,}flashdiagdma"
-	[ "$DIAGWRITE" = "1" ] && DIAG_EXTRA="${DIAG_EXTRA:+$DIAG_EXTRA,}flashdiagwrite"
-	echo "    DIAG build: make flashdiag TAGS_EXTRA=$DIAG_EXTRA"
-	( cd "$CAIRN" && TAMAGO="$TAMAGO" TAGS_EXTRA="$DIAG_EXTRA" make flashdiag )
+	# Read-only FMC/SPI-NOR hardware diagnostic payload (flashdiag tag).
+	TAGS="ast2700dcscm,linkcpuinit,flashdiag"
+	[ "$DIAGDMA" = "1" ] && TAGS="$TAGS,flashdiagdma"
+	[ "$DIAGWRITE" = "1" ] && TAGS="$TAGS,flashdiagwrite"
+	[ -n "${FACETUI:-}" ] && TAGS="$TAGS,facetui"
+	echo "    DIAG build: tags=$TAGS"
+	build_payload "$TAGS" "$PAYLOAD_ELF"
 else
-	( cd "$CAIRN" && TAMAGO="$TAMAGO" VIDEO="${VIDEO:-}" TAGS_EXTRA="$CAIRN_TAGS" make build )
+	TAGS="linkcpuinit,ast2700dcscm"
+	[ "${VIDEO:-}" = "1" ] && TAGS="$TAGS,ast2700video,linkprintk"
+	[ -n "${FACETUI:-}" ] && TAGS="$TAGS,facetui"
+	build_payload "$TAGS" "$PAYLOAD_ELF"
 fi
 llvm-objcopy -O binary "$PAYLOAD_ELF" "$STAGE/cairn.payload.bin"
 
@@ -136,7 +147,7 @@ for f in caliptra-fw.bin \
 done
 
 # The MCU runtime (BootMCU FMC, FLSH id 3). By default we build our own
-# aspeed-mcu-runtime Rust BootMCU for A2 from source. A2 links the FMC at GSRAM
+# mcu-runtime Rust BootMCU for A2 from source. A2 links the FMC at GSRAM
 # base 0x14B80000 (the A2 ROM loads it there, with no ASTH header); the A1
 # default links at 0x14B80A00 and faults the instant the A2 ROM jumps to it —
 # the firmware loads (Ff=0000) and is entered (J=0000) but every absolute
@@ -144,9 +155,9 @@ done
 # the A2 layout (link/ast2700-bootmcu-a2.x) when AST2700_BOOTMCU_A2 is set.
 #
 # Set MCU_RUNTIME_BIN to override with a prebuilt binary (e.g. vendor Zephyr, or
-# a pre-built FMC); set MCU_RUNTIME_SRC to point at a different aspeed-mcu-runtime
+# a pre-built FMC); set MCU_RUNTIME_SRC to point at a different mcu-runtime
 # checkout.
-MCU_RUNTIME_SRC="${MCU_RUNTIME_SRC:-$CAIRN/../aspeed-mcu-runtime}"
+MCU_RUNTIME_SRC="${MCU_RUNTIME_SRC:-$CAIRN/../mcu-runtime}"
 if [ -n "${MCU_RUNTIME_BIN:-}" ]; then
 	echo "    MCU runtime (prebuilt): $MCU_RUNTIME_BIN"
 	cp "$MCU_RUNTIME_BIN" "$STAGE/ast2700-mcu-runtime.bin"
@@ -159,7 +170,7 @@ elif [ -d "$MCU_RUNTIME_SRC/app-rot" ]; then
 	llvm-objcopy -O binary "$MCU_ELF" "$STAGE/ast2700-mcu-runtime.bin"
 else
 	echo "ERROR: no MCU runtime: set MCU_RUNTIME_BIN to a prebuilt FMC, or" >&2
-	echo "       MCU_RUNTIME_SRC to an aspeed-mcu-runtime checkout to build ours." >&2
+	echo "       MCU_RUNTIME_SRC to an mcu-runtime checkout to build ours." >&2
 	exit 1
 fi
 

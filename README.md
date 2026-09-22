@@ -62,17 +62,33 @@ Cairn follows the same embedded-friendly conventions as vein:
 
 ## Build
 
-The AST2700 arm64 SoC/board support lives in a TamaGo fork that is not yet
-upstream. Until it lands, `go.work` redirects `github.com/usbarmory/tamago` to
-that fork (`../tamago`).
+Everything is built with [Dagger](https://dagger.io), which fetches the TamaGo
+fork (AST2700 support), the shared Kyanite modules and the tamago-go compiler
+release from public GitHub — so the whole flow builds from public sources with
+no local checkouts and no toolchain setup beyond Dagger:
 
 ```bash
-make build       # AST2700 DC-SCM EVB ELF → bin/cairn.elf
-make test        # host unit tests (user_linux tag)
+dagger call build export --path ./bin   # AST2700 DC-SCM EVB ELF → bin/cairn.elf
+dagger call test                        # host unit tests (user_linux tag)
+dagger call ci                          # build + test (what CI runs)
 ```
 
-Requires the TamaGo compiler (`TAMAGO=/path/to/tamago-go/bin/go`) and
-`llvm-readelf`.
+Pass `--<dir>` (e.g. `--core ../core`, `--tamago ../tamago`) to build against a
+local checkout instead of the public default.
+
+### Full SPI flash image
+
+```bash
+# A1: fully reproducible, in-container. --bmc-pb supplies the vendor prebuilts
+# (Caliptra FW, DDR training, DP FW), which are not redistributable.
+dagger call image --bmc-pb ../bmc-pb --silicon a1 export --path ./out
+
+# A2: FLSH container + vendor-signed ATMN SoC manifest. The manifest signing
+# uses the vendor cptra_imgtool and is not reproducible in-container, so it runs
+# on the host — see tools/a2/gen-a2-image.sh.
+CPTRA_IMGTOOL=../cptra_imgtool PREBUILT=/path/to/a2-prebuilts \
+    tools/a2/gen-a2-image.sh
+```
 
 ## Module
 
