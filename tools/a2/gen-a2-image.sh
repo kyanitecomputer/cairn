@@ -79,19 +79,30 @@ mkdir -p "$OUT" "$STAGE"
 rm -f "$OUT/$IMAGE_NAME"
 
 echo "==> 1/4 build cairn CA35 payload"
-# Forward VIDEO=1 (framebuffer console) and FACETUI=1 (embed the facet SPA).
-CAIRN_TAGS=""
-if [ -n "${FACETUI:-}" ]; then
-	CAIRN_TAGS="facetui"
-fi
+# Cross-compile the CA35 payload ELF with the host TamaGo compiler. The CA35
+# cores are Cortex-A35 (ARMv8.0-A, no FEAT_LSE), so pin GOARM64=v8.0 to keep the
+# compiler from emitting large-system atomics (which trap on this core). The
+# payload links at the CA35-view DRAM text base (0x404000000). VIDEO=1 compiles
+# in the DisplayPort framebuffer console; FACETUI=1 embeds the facet SPA.
+build_payload() {
+	( cd "$CAIRN" && GOOS=tamago GOARCH=arm64 GOARM64=v8.0 \
+	    GOOSPKG=github.com/usbarmory/tamago GOTOOLCHAIN=local \
+	    "$TAMAGO" build -trimpath -tags "$1" \
+	    -ldflags "-T 0x404000000 -R 0x1000" -o "$2" ./target/ast2700-dcscm-evb )
+}
 if [ "$DIAG" = "1" ]; then
-	DIAG_EXTRA="$CAIRN_TAGS"
-	[ "$DIAGDMA" = "1" ] && DIAG_EXTRA="${DIAG_EXTRA:+$DIAG_EXTRA,}flashdiagdma"
-	[ "$DIAGWRITE" = "1" ] && DIAG_EXTRA="${DIAG_EXTRA:+$DIAG_EXTRA,}flashdiagwrite"
-	echo "    DIAG build: make flashdiag TAGS_EXTRA=$DIAG_EXTRA"
-	( cd "$CAIRN" && TAMAGO="$TAMAGO" TAGS_EXTRA="$DIAG_EXTRA" make flashdiag )
+	# Read-only FMC/SPI-NOR hardware diagnostic payload (flashdiag tag).
+	TAGS="ast2700dcscm,linkcpuinit,flashdiag"
+	[ "$DIAGDMA" = "1" ] && TAGS="$TAGS,flashdiagdma"
+	[ "$DIAGWRITE" = "1" ] && TAGS="$TAGS,flashdiagwrite"
+	[ -n "${FACETUI:-}" ] && TAGS="$TAGS,facetui"
+	echo "    DIAG build: tags=$TAGS"
+	build_payload "$TAGS" "$PAYLOAD_ELF"
 else
-	( cd "$CAIRN" && TAMAGO="$TAMAGO" VIDEO="${VIDEO:-}" TAGS_EXTRA="$CAIRN_TAGS" make build )
+	TAGS="linkcpuinit,ast2700dcscm"
+	[ "${VIDEO:-}" = "1" ] && TAGS="$TAGS,ast2700video,linkprintk"
+	[ -n "${FACETUI:-}" ] && TAGS="$TAGS,facetui"
+	build_payload "$TAGS" "$PAYLOAD_ELF"
 fi
 llvm-objcopy -O binary "$PAYLOAD_ELF" "$STAGE/cairn.payload.bin"
 

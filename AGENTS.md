@@ -22,14 +22,19 @@ implementing the `pkg/bmcdev` interface and reuses `pkg/` and `core/` unchanged.
 
 ## Build & test
 
+Dagger is the only build interface; it fetches the TamaGo fork, the shared
+Kyanite modules and the tamago-go compiler release from public GitHub, so builds
+need no local checkouts. Override any source with `--<dir>` for local work.
+
 ```sh
-make build      # TamaGo ELF -> bin/cairn.elf (needs TAMAGO set to a tamago-go binary)
-make test       # host unit tests (user_linux tag)
-dagger call ci  # reproducible CI (build + test)
+dagger call build export --path ./bin   # TamaGo ELF -> bin/cairn.elf
+dagger call test                        # host unit tests (user_linux tag)
+dagger call ci                          # build + test (what CI runs)
 ```
 
-Compiles with `GOOS=tamago GOARCH=arm64`. The AST2700 SoC/board support comes
-from a TamaGo fork wired in via a local (git-ignored) `go.work`.
+Compiles with `GOOS=tamago GOARCH=arm64`. The A1 SPI image is
+`dagger call image --bmc-pb <prebuilts> --silicon a1`; the A2 image (vendor-signed
+FLSH container, not reproducible in-container) is `tools/a2/gen-a2-image.sh`.
 
 ## Conventions
 
