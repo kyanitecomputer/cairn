@@ -1,0 +1,33 @@
+name: CI
+
+# Builds and tests Cairn entirely from public sources. The Dagger `ci` function
+# fetches the TamaGo fork, the shared Kyanite modules and the tamago-go compiler
+# release from public GitHub, cross-compiles the AST2700 payload and runs the
+# host unit tests — so this workflow needs no secrets and no extra inputs.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Build + test (dagger call ci)
+        uses: dagger/dagger-for-github@27b130bf0f79a7f6fbbbe0fbca6760dc9bb40a77 # v8.4.1
+        with:
+          version: "0.21.9"
+          verb: call
+          args: ci
