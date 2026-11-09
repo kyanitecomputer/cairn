@@ -31,6 +31,9 @@ target/ast2700-dcscm-evb/   AST2700 DC-SCM PLATFORM code. Everything hardware-sp
                               package for CA35 bring-up (no in-tree hardware code yet)
   chassis/                    baseboard-management driver (implements pkg/bmcdev.Chassis; stub)
 
+target/gigabyte-mj11-ec1-bmc/  Gigabyte MJ11-EC1 BMC (AST2500, ARM1176JZ-S) PLATFORM code,
+                              booted by fstart; console-first (no network yet)
+
 pkg/                        SHAREABLE across cairn targets; hardware-agnostic (deps on interfaces).
   bmcdev/                     baseboard-management interface + shared value types
   config/                     typed configuration layer (Defaults + Normalize pattern)
@@ -73,6 +76,20 @@ make test        # host unit tests (user_linux tag)
 
 Requires the TamaGo compiler (`TAMAGO=/path/to/tamago-go/bin/go`) and
 `llvm-readelf`.
+
+The Gigabyte MJ11-EC1 BMC target needs the fork's `aspeed-next` branch (its
+AST2500 and MJ11-EC1 board support) and tamago-go 1.27.2 or later. It builds
+with `GOARM=5`: with the MMU off the AST2500 has no exclusive monitor for
+LDREX/STREX.
+
+```bash
+GOOS=tamago GOARCH=arm GOARM=5 GOOSPKG=github.com/usbarmory/tamago \
+  $TAMAGO build -trimpath -ldflags "-T 0x80010000 -R 0x1000" \
+  -o bin/cairn-mj11.elf ./target/gigabyte-mj11-ec1-bmc
+```
+
+fstart packs it as the payload of the MJ11-EC1 BMC image:
+`cargo fbuild assemble --board gigabyte-mj11-ec1-bmc --release --payload elf --kernel bin/cairn-mj11.elf`.
 
 ## Module
 

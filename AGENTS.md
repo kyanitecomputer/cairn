@@ -13,7 +13,8 @@ It shares the `src.kyanite.computer/core` microkernel with `vein`.
 ## Layout
 
 - `target/<platform>/` — platform-specific code and the entry point (`main.go`).
-  The AST2700 DC-SCM target is `target/ast2700-dcscm-evb`.
+  The AST2700 DC-SCM target is `target/ast2700-dcscm-evb`; the Gigabyte MJ11-EC1
+  BMC (AST2500, booted by fstart) is `target/gigabyte-mj11-ec1-bmc`.
 - `pkg/` — hardware-agnostic, shareable packages (interfaces + value types).
 - `.dagger/` — Dagger CI/build module.
 
